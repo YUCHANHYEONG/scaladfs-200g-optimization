@@ -1572,7 +1572,10 @@ static int osc_completion(const struct lu_env *env, struct osc_async_page *oap,
 static void osc_consume_write_grant(struct client_obd *cli,
 				    struct brw_page *pga)
 {
-	assert_spin_locked(&cli->cl_loi_list_lock);
+	/* ych	*/
+	assert_spin_locked(&cli->cl_grant_lock);
+	//assert_spin_locked(&cli->cl_loi_list_lock);
+	/* ych	*/
 	// LASSERT(!(pga->flag & OBD_BRW_FROM_GRANT)); //test
 	cli->cl_dirty_pages++;
 	pga->flag |= OBD_BRW_FROM_GRANT;
@@ -1587,7 +1590,10 @@ static void osc_release_write_grant(struct client_obd *cli,
 {
 	ENTRY;
 
-	assert_spin_locked(&cli->cl_loi_list_lock);
+	/* ych	*/
+	assert_spin_locked(&cli->cl_grant_lock);
+	//assert_spin_locked(&cli->cl_loi_list_lock);
+	/* ych	*/
 	if (!(pga->flag & OBD_BRW_FROM_GRANT)) {
 		EXIT;
 		return;
@@ -1654,13 +1660,19 @@ static void osc_unreserve_grant(struct client_obd *cli,
 	ktime_t localclock[2];
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_unreserve_grant);
 //        printk("[%s] cli->cl_avail_grant=%lu(KB)\n", __func__,
 //			                        cli->cl_avail_grant/1024);
 	osc_unreserve_grant_nolock(cli, reserved, unused);
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 }
 
 KTDEF(cl_loi_list_lock_osc_free_grant);
@@ -1688,7 +1700,10 @@ static void osc_free_grant(struct client_obd *cli, unsigned int nr_pages,
 	grant = (1 << cli->cl_chunkbits) + cli->cl_grant_extent_tax;
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_free_grant);
 	// atomic_long_sub(nr_pages, &obd_dirty_pages);
@@ -1703,7 +1718,10 @@ static void osc_free_grant(struct client_obd *cli, unsigned int nr_pages,
 		cli->cl_avail_grant += grant;
 	}
 	osc_wake_cache_waiters(cli);
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	CDEBUG(D_CACHE, "lost %u grant: %lu avail: %lu dirty: %lu/%lu\n",
 	       lost_grant, cli->cl_lost_grant,
 	       cli->cl_avail_grant, cli->cl_dirty_pages << PAGE_SHIFT,
@@ -1722,11 +1740,17 @@ static void osc_exit_cache(struct client_obd *cli, struct osc_async_page *oap)
 	ktime_t localclock[2];
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_exit_cache);
 	osc_release_write_grant(cli, &oap->oap_brw_page);
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 }
 
 KTDEF(osc_enter_cache_atomic);
@@ -1820,7 +1844,10 @@ static inline void application_unlock_and_unplug(const struct lu_env *env,
 	struct lu_env			temp_env = { .le_ses = &ses };
 	int ret;
 
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 
 	ret = lu_context_init(&temp_env.le_ctx, LCT_MD_THREAD |
 					LCT_DT_THREAD |
@@ -1852,7 +1879,10 @@ static inline void cli_lock_after_unplug(struct client_obd *cli)
 	ktime_t localclock[2];
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_cli_lock_after_unplug);
 }
@@ -1921,7 +1951,10 @@ static int osc_enter_cache(const struct lu_env *env, struct client_obd *cli,
 	ktput(localclock, ptlrpc_prep_set);
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, ych_cl_loi_list_lock);
 
@@ -2012,7 +2045,10 @@ static int osc_enter_cache(const struct lu_env *env, struct client_obd *cli,
 
 	EXIT;
 out:
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	/* ych add	*/
 	if  (set != NULL){
 		ktget(&localclock[0]);
@@ -3122,7 +3158,10 @@ int osc_queue_async_io(const struct lu_env *env, struct cl_io *io,
 			}
 		}
 		ktget(&localclock[0]);
-		spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_lock(&cli->cl_grant_lock);
+		//spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		ktget(&localclock[1]);
 		ktput(localclock, cl_loi_list_lock_osc_queue_async_io_1);
 		if (max_idx == 0) {
@@ -3135,7 +3174,10 @@ int osc_queue_async_io(const struct lu_env *env, struct cl_io *io,
 	//	cli->cl_avail_grant = (unsigned long)8 * 1024 * 1024;
 	//	printk("[%s] cli->cl_avail_grant=%lu\n", __func__,
 	//			cli->cl_avail_grant);
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/	
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/	
 
 	}
 	/* taehwan code */
@@ -3222,7 +3264,10 @@ int osc_queue_async_io(const struct lu_env *env, struct cl_io *io,
 		/* it doesn't need any grant to dirty this page */
 
 		ktget(&localclock[0]);
-		spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_lock(&cli->cl_grant_lock);
+		//spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		ktget(&localclock[1]);
 		ktput(localclock, cl_loi_list_lock);
 
@@ -3252,7 +3297,10 @@ int osc_queue_async_io(const struct lu_env *env, struct cl_io *io,
 		// grants = 0;
 		// need_release = 1;
 
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		rc = 0;
 
 	} else if (ext != NULL) {
@@ -3533,7 +3581,10 @@ int osc_queue_sync_pages(const struct lu_env *env, struct cl_io *io,
 
 		CDEBUG(D_CACHE, "requesting %d bytes grant\n", grants);
 		ktget(&localclock[0]);
-		spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_lock(&cli->cl_grant_lock);
+		//spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		ktget(&localclock[1]);
 		ktput(localclock, cl_loi_list_lock_osc_queue_sync_pages);
 		if (osc_reserve_grant(cli, grants) == 0) {
@@ -3555,7 +3606,10 @@ int osc_queue_sync_pages(const struct lu_env *env, struct cl_io *io,
 			CDEBUG(D_CACHE,
 			"not enough grant available, switching to sync for this i/o\n");
 		}
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		osc_update_next_shrink(cli);
 	}
 

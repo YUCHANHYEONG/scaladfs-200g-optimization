@@ -218,6 +218,17 @@ struct client_obd {
 	enum lustre_sec_part	 cl_sp_to;
 	struct sptlrpc_flavor	 cl_flvr_mgc; /* fixed flavor of mgc->mgs */
 
+	/* ych	*/
+	/* protected by cl_grant_lock
+	 *  - cl_dirty_pages
+	 *  - cl_dirty_max_pages
+	 *  - cl_avail_grant
+	 *  - cl_lost_grant
+	 *  - cl_dirty_grant
+	 *  - cl_reserved_grant
+	 */
+	spinlock_t		cl_grant_lock;
+	/* ych	*/
 	/* the grant values are protected by loi_list_lock below */
 	unsigned long		 cl_dirty_pages;      /* all _dirty_ in pages */
 	unsigned long		 cl_dirty_max_pages;  /* allowed w/o rpc */

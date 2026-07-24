@@ -409,6 +409,9 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	INIT_LIST_HEAD(&cli->cl_loi_hp_ready_list);
 	INIT_LIST_HEAD(&cli->cl_loi_write_list);
 	INIT_LIST_HEAD(&cli->cl_loi_read_list);
+	/* ych	*/
+	spin_lock_init(&cli->cl_grant_lock);
+	/* ych	*/
 	spin_lock_init(&cli->cl_loi_list_lock);
 	atomic_set(&cli->cl_pending_w_pages, 0);
 	atomic_set(&cli->cl_pending_r_pages, 0);

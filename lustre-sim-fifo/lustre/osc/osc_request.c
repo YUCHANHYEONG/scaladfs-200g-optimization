@@ -699,7 +699,10 @@ static void osc_announce_cached(struct client_obd *cli, struct obdo *oa,
 
 	oa->o_valid |= bits;
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_announce_cached);
 	if (cli->cl_ocd_grant_param)
@@ -760,7 +763,10 @@ static void osc_announce_cached(struct client_obd *cli, struct obdo *oa,
 		oa->o_dropped = cli->cl_lost_grant;
 	}
 	cli->cl_lost_grant -= oa->o_dropped;
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	CDEBUG(D_CACHE, "%s: dirty: %llu undirty: %u dropped %u grant: %llu"
 	       " cl_lost_grant %lu\n", cli_name(cli), oa->o_dirty,
 	       oa->o_undirty, oa->o_dropped, oa->o_grant, cli->cl_lost_grant);
@@ -783,11 +789,17 @@ static void __osc_update_grant(struct client_obd *cli, u64 grant)
 	ktime_t localclock[2];
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock___osc_update_grant);
 	cli->cl_avail_grant += grant;
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 }
 
 static void osc_update_grant(struct client_obd *cli, struct ost_body *body)
@@ -839,12 +851,18 @@ static void osc_shrink_grant_local(struct client_obd *cli, struct obdo *oa)
 	ktime_t localclock[2];
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_shrink_grant_local);
 	oa->o_grant = cli->cl_avail_grant / 4;
 	cli->cl_avail_grant -= oa->o_grant;
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
         if (!(oa->o_valid & OBD_MD_FLFLAGS)) {
                 oa->o_valid |= OBD_MD_FLFLAGS;
                 oa->o_flags = 0;
@@ -867,12 +885,28 @@ static int osc_shrink_grant(struct client_obd *cli)
 			     (cli->cl_max_pages_per_rpc << PAGE_SHIFT);
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_shrink_grant);
 	if (cli->cl_avail_grant <= target_bytes)
 		target_bytes = cli->cl_max_pages_per_rpc << PAGE_SHIFT;
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+
+	/* ych	*/
+	ktget(&localclock[1]);
+	ktput(localclock, cl_loi_list_lock_osc_shrink_grant);
+	if (cli->cl_avail_grant <= target_bytes)
+		target_bytes = cli->cl_max_pages_per_rpc << PAGE_SHIFT;
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 
 	return osc_shrink_grant_to_target(cli, target_bytes);
 }
@@ -891,7 +925,10 @@ int osc_shrink_grant_to_target(struct client_obd *cli, __u64 target_bytes)
 	ENTRY;
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_shrink_grant_to_target_1);
 	/* Don't shrink if we are already above or below the desired limit
@@ -901,10 +938,16 @@ int osc_shrink_grant_to_target(struct client_obd *cli, __u64 target_bytes)
 		target_bytes = cli->cl_max_pages_per_rpc << PAGE_SHIFT;
 
 	if (target_bytes >= cli->cl_avail_grant) {
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		RETURN(0);
 	}
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 
 	OBD_ALLOC_PTR(body);
 	if (!body)
@@ -913,17 +956,26 @@ int osc_shrink_grant_to_target(struct client_obd *cli, __u64 target_bytes)
 	osc_announce_cached(cli, &body->oa, 0);
 
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_shrink_grant_to_target_2);
 	if (target_bytes >= cli->cl_avail_grant) {
 		/* available grant has changed since target calculation */
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		GOTO(out_free, rc = 0);
 	}
 	body->oa.o_grant = cli->cl_avail_grant - target_bytes;
 	cli->cl_avail_grant = target_bytes;
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
         if (!(body->oa.o_valid & OBD_MD_FLFLAGS)) {
                 body->oa.o_valid |= OBD_MD_FLFLAGS;
                 body->oa.o_flags = 0;
@@ -1073,7 +1125,10 @@ void osc_init_grant(struct client_obd *cli, struct obd_connect_data *ocd)
 	 * left EVICTED state, then cl_dirty_pages must be 0 already.
 	 */
 	ktget(&localclock[0]);
-	spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_lock(&cli->cl_grant_lock);
+	//spin_lock(&cli->cl_loi_list_lock);
+	/* ych	*/
 	ktget(&localclock[1]);
 	ktput(localclock, cl_loi_list_lock_osc_init_grant);
 	//ocd->ocd_grant = cli->cl_dirty_max_pages * 4 * 1024 * 8;
@@ -1148,7 +1203,10 @@ void osc_init_grant(struct client_obd *cli, struct obd_connect_data *ocd)
 		cli->cl_chunkbits = PAGE_SHIFT;
 		cli->cl_max_extent_pages = DT_MAX_BRW_PAGES;
 	}
-	spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
+	spin_unlock(&cli->cl_grant_lock);
+	//spin_unlock(&cli->cl_loi_list_lock);
+	/* ych	*/
 
 	CDEBUG(D_CACHE,
 	       "%s, setting cl_avail_grant: %ld cl_lost_grant: %ld. chunk bits: %d cl_max_extent_pages: %d\n",
@@ -3952,7 +4010,10 @@ int osc_reconnect(const struct lu_env *env, struct obd_export *exp,
 		long grant;
 
 		ktget(&localclock[0]);
-		spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_lock(&cli->cl_grant_lock);
+		//spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		ktget(&localclock[1]);
 		ktput(localclock, cl_loi_list_lock_osc_reconnect);
 		grant = cli->cl_avail_grant + cli->cl_reserved_grant;
@@ -3966,7 +4027,10 @@ int osc_reconnect(const struct lu_env *env, struct obd_export *exp,
 		data->ocd_grant = grant ? : 2 * cli_brw_size(obd);
 		lost_grant = cli->cl_lost_grant;
 		cli->cl_lost_grant = 0;
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
 
 		CDEBUG(D_RPCTRACE, "ocd_connect_flags: %#llx ocd_version: %d"
 		       " ocd_grant: %d, lost: %ld.\n", data->ocd_connect_flags,
@@ -4053,12 +4117,18 @@ static int osc_import_event(struct obd_device *obd,
         case IMP_EVENT_DISCON: {
                 cli = &obd->u.cli;
 		ktget(&localclock[0]);
-		spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_lock(&cli->cl_grant_lock);
+		//spin_lock(&cli->cl_loi_list_lock);
+		/* ych	*/
 		ktget(&localclock[1]);
 		ktput(localclock, cl_loi_list_lock_osc_import_event);
 		cli->cl_avail_grant = 0;
 		cli->cl_lost_grant = 0;
-		spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
+		spin_unlock(&cli->cl_grant_lock);
+		//spin_unlock(&cli->cl_loi_list_lock);
+		/* ych	*/
                 break;
         }
         case IMP_EVENT_INACTIVE: {
