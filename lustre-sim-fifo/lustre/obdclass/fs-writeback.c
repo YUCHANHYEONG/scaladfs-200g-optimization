@@ -1611,27 +1611,27 @@ static struct inode *lustre_queue_io(struct bdi_writeback *wb, struct wb_writeba
 	//list = FetchTail(&wb->lock_free_dirty);
 	/* ych	*/
 
-	if (list){
-		inode = wb_inode(list);
-		spin_lock(&inode->i_lock);
-		list_del_init(&inode->i_io_list);
-		moved++;
-		inode->i_state |= I_SYNC_QUEUED;
-		spin_unlock(&inode->i_lock);
-	}
-
 //	if (list){
 //		inode = wb_inode(list);
-//		if (!spin_is_locked(&inode->i_lock)){
-//			spin_lock(&inode->i_lock);
-//			list_del_init(&inode->i_io_list);
-//			moved++;
-//			inode->i_state |= I_SYNC_QUEUED;
-//			spin_unlock(&inode->i_lock);
-//		}
-//		else
-//			inode = NULL;
+//		spin_lock(&inode->i_lock);
+//		list_del_init(&inode->i_io_list);
+//		moved++;
+//		inode->i_state |= I_SYNC_QUEUED;
+//		spin_unlock(&inode->i_lock);
 //	}
+
+	if (list){
+		inode = wb_inode(list);
+		if (!spin_is_locked(&inode->i_lock)){
+			spin_lock(&inode->i_lock);
+			list_del_init(&inode->i_io_list);
+			moved++;
+			inode->i_state |= I_SYNC_QUEUED;
+			spin_unlock(&inode->i_lock);
+		}
+		else
+			inode = NULL;
+	}
 
 	if (moved)
 		wb_io_lists_populated(wb);
