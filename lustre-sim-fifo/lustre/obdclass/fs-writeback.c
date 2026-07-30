@@ -29,8 +29,10 @@
 #include <linux/device.h>
 #include <linux/memcontrol.h>
 #include "internal.h"
-#include "../include/calclock.h"
 #include <linux/lflist.h>
+
+#include "../include/lockfree_list.h"
+#include "../include/calclock.h"
 extern bool trylock_super(struct super_block *sb); //Kiet
 extern void inode_add_lru(struct inode *inode);
 extern long get_nr_dirty_inodes(void);
@@ -1371,6 +1373,10 @@ void wb_start_background_writeback(struct bdi_writeback *wb)
 
 #endif /*Kiet*/
 
+/* ych	*/
+extern int MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
+/* ych	*/
+
 /*
  * Remove the inode from the writeback list it is on.
  */
@@ -1381,10 +1387,12 @@ void lustre_inode_io_list_del(struct inode *inode)
 	wb = inode_to_wb_and_lock_list(inode);
 	spin_lock(&inode->i_lock);
 
+	/* ych	*/
+	MarkInodeNodes(&wb->lock_free_dirty, &inode->i_io_list);
+	/* ych	*/
+
 	inode->i_state &= ~I_SYNC_QUEUED;
 	list_del_init(&inode->i_io_list);
-	// inode->i_io_list.next = NULL;
-	// inode->i_io_list.prev = NULL;
 	wb_io_lists_depopulated(wb);
 
 	spin_unlock(&inode->i_lock);
@@ -1611,27 +1619,28 @@ static struct inode *lustre_queue_io(struct bdi_writeback *wb, struct wb_writeba
 	//list = FetchTail(&wb->lock_free_dirty);
 	/* ych	*/
 
-//	if (list){
-//		inode = wb_inode(list);
-//		spin_lock(&inode->i_lock);
-//		list_del_init(&inode->i_io_list);
-//		moved++;
-//		inode->i_state |= I_SYNC_QUEUED;
-//		spin_unlock(&inode->i_lock);
-//	}
-
 	if (list){
 		inode = wb_inode(list);
-		if (!spin_is_locked(&inode->i_lock)){
-			spin_lock(&inode->i_lock);
-			list_del_init(&inode->i_io_list);
-			moved++;
-			inode->i_state |= I_SYNC_QUEUED;
-			spin_unlock(&inode->i_lock);
-		}
-		else
-			inode = NULL;
+
+		spin_lock(&inode->i_lock);
+		list_del_init(&inode->i_io_list);
+		//moved++;
+		inode->i_state |= I_SYNC_QUEUED;
+		spin_unlock(&inode->i_lock);
 	}
+
+//	if (list){
+//		inode = wb_inode(list);
+//		if (!spin_is_locked(&inode->i_lock)){
+//			spin_lock(&inode->i_lock);
+//			list_del_init(&inode->i_io_list);
+//			//moved++;
+//			inode->i_state |= I_SYNC_QUEUED;
+//			spin_unlock(&inode->i_lock);
+//		}
+//		else
+//			inode = NULL;
+//	}
 
 	if (moved)
 		wb_io_lists_populated(wb);
@@ -2602,7 +2611,10 @@ static long lustre_wb_writeback(struct bdi_writeback *wb,
 		ktget(&localclock[1]);
 		ktput(localclock, __writeback_inodes_wb);
 
-
+		/* ych	*/
+		lustre_iput(inode);
+		inode = NULL;
+		/* ych	*/
 
 		/*
 		 * Did we write something? Try for more

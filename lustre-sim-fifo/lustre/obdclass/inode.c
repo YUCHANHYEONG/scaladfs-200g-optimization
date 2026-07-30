@@ -550,8 +550,6 @@ EXPORT_SYMBOL(clear_inode);
 
 #endif /*Kiet*/
 
-void lustre_inode_io_list_del(struct inode *inode);
-
 /*
  * Free the inode passed in, removing it from the lists it is still connected
  * to. We remove any pages still attached to the inode and wait for any IO that
@@ -571,9 +569,6 @@ static void evict(struct inode *inode)
 
 	BUG_ON(!(inode->i_state & I_FREEING));
 	BUG_ON(!list_empty(&inode->i_lru));
-
-	if (!list_empty(&inode->i_io_list))
-		lustre_inode_io_list_del(inode);
 
 	inode_sb_list_del(inode);
 

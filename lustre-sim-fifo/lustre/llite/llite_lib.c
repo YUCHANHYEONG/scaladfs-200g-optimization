@@ -3140,6 +3140,9 @@ int ll_read_inode2(struct inode *inode, void *opaque)
 	return 0;
 }
 
+void lustre_inode_io_list_del(struct inode *inode);
+
+
 void ll_delete_inode(struct inode *inode)
 {
 	struct ll_inode_info *lli = ll_i2info(inode);
@@ -3156,6 +3159,19 @@ void ll_delete_inode(struct inode *inode)
 		cl_sync_file_range(inode, 0, OBD_OBJECT_EOF, inode->i_nlink ?
 				   CL_FSYNC_LOCAL : CL_FSYNC_DISCARD, 1);
 	}
+
+	/* ych	*/
+	//printk("[%s] before mark inode=%p ino=%lu\n",
+	//		__func__, inode, inode->i_ino);
+
+	if (inode->i_wb) {
+		lustre_inode_io_list_del(inode);
+		synchronize_rcu();
+	}
+
+	//printk("[%s] after mark inode=%p ino=%lu\n",
+	//		__func__, inode, inode->i_ino);
+	/* ych	*/
 
 	ll_truncate_inode_pages_final(inode);
 	ll_clear_inode(inode);

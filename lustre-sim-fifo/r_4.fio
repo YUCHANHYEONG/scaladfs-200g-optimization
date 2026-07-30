@@ -18,7 +18,7 @@ runtime=30
 group_reporting
 
 [amd2]
-size=3G
+size=5G
 ;size=100M
 ;nrfiles=2
 ;ioengine=libaio

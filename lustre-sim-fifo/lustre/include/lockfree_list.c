@@ -1,9 +1,11 @@
 #include <linux/kernel.h>
 #include <linux/export.h>
-#include "lockfree_list.h"
 #include <linux/hash.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
+
+#include "../include/lockfree_list.h"
+#include "../include/calclock.h"
 
 #define mem_alloc(size) kmalloc(size, GFP_KERNEL)
 
@@ -18,6 +20,25 @@ static struct LNode* unmark( struct LNode* node)
 {
 	return (struct LNode*)((unsigned long long)(node) & 0xFFFFFFFFFFFFFFFE);
 }
+
+/* ych	*/
+static bool TryMarkNode(struct LNode *lock)
+{
+	while (true) {	
+		struct LNode *orig = lock->next;
+		unsigned long long _marked;
+
+		if (marked(orig))
+			return false;
+
+		_marked = (unsigned long long)orig + 1;
+
+		if (cmpxchg(&lock->next, orig, 
+				(struct LNode *)_marked) == orig)
+			return true;
+	}
+}
+/* ych	*/
 
 static void rlock_node_rcu_free(struct rcu_head *head)
 {
@@ -117,6 +138,65 @@ static inline u32 hash_list_head(const struct list_head *list)
 
 #endif
 
+/* ych	*/
+int MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode)
+{
+	struct LNode *cur;
+	struct LNode *next;
+	int nr_marked = 0;
+
+#if HASH_MODE
+	int i;
+
+	if (!list_rl || !inode)
+		return 0;
+
+	i = hash_list_head(inode);
+
+restart:
+	rcu_read_lock();
+	cur = list_rl->head[i];
+#else
+	if (!list_rl || !inode)
+		return 0;
+
+restart:
+	rcu_read_lock();
+	cur = list_rl->head;
+#endif
+
+	while (true) {
+		if (!cur)
+			break;
+
+		if (marked(cur)) {
+			rcu_read_unlock();
+			goto restart;
+		}
+
+		next = cur->next;
+
+		if (marked(next)) {
+			cur = unmark(next);
+			continue;
+		}
+
+		if (cur->inode == inode) {
+			if (TryMarkNode(cur))
+				nr_marked++;
+
+			next = cur->next;
+		}
+
+		cur = unmark(next);
+	}
+
+	rcu_read_unlock();
+	return nr_marked;
+}
+EXPORT_SYMBOL(MarkInodeNodes);
+/* ych	*/
+
 static void
 InitNode(struct LNode *node, struct list_head *inode)
 {
@@ -164,6 +244,15 @@ struct RangeLock* __InsertInode(struct ListRL *list_rl,
 		goto free_rl;
 	}
 	InitNode(lnode, inode);
+
+	/* ych	*/
+	/*
+	 * Each queued LNode owns one inode reference.
+	 * inode_io_list_move_locked() holds inode->i_lock.
+	 */
+	__iget(list_entry(inode, struct inode, i_io_list));
+	/* ych	*/
+
 	// pr_debug("Lnode inode: %p\n", lnode->inode);
 	do {
 		ret = InsertNodeRW(&list_rl->head, lnode, false);
@@ -206,6 +295,9 @@ struct list_head* __FetchHead(struct LNode** listrl)
 	struct list_head* inode = NULL;
 	struct LNode** prev;
 	struct LNode* cur;
+	/* ych	*/
+	struct inode *vfs_inode;
+	/* ych	*/
 
 restart:
 	rcu_read_lock();
@@ -234,10 +326,20 @@ restart:
 
 		if (cur) {
 			inode = DeleteNodeLH(cur);
-			// if (!inode){
-			// 	rcu_read_unlock();
-			// 	goto restart;
-			// }
+			/* ych	*/
+			if (!inode){
+				rcu_read_unlock();
+				goto restart;
+			}
+
+			vfs_inode = list_entry(inode, struct inode, i_io_list);
+
+			if (!igrab(vfs_inode)) {
+				inode = NULL;
+				rcu_read_unlock();
+				goto restart;
+			}
+			/* ych	*/
 			break;
 		}
 

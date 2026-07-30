@@ -65,6 +65,10 @@ static inline struct RangeLock* InsertInode(struct ListRL* list_rl,
 	return __InsertInode(list_rl, inode, false);
 }
 
+/* ych	*/
+int MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
+/* ych	*/
+
 void bucket_init(struct ListRL *list_rl);
 
 #endif /* LOCKFREE_LIST_H */
