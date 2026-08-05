@@ -3397,6 +3397,7 @@ void free_unref_page_list(struct list_head *list)
 	}
 	local_irq_restore(flags);
 }
+EXPORT_SYMBOL(free_unref_page_list);
 
 /*
  * split_page takes a non-compound higher-order page, and splits it into
@@ -4495,7 +4496,226 @@ EXPORT_SYMBOL_GPL(fs_reclaim_release);
 
 #endif /*Kiet*/
 
+extern bool free_unref_page_prepare(struct page *page, unsigned long pfn);
+extern void free_unref_page_commit(struct page *page, unsigned long pfn);
+extern void free_one_page(struct zone *zone,
+                                struct page *page, unsigned long pfn,
+                                unsigned int order,
+                                int migratetype, fpi_t fpi_flags);
+extern void free_pcppages_bulk(struct zone *zone, int count,
+                                        struct per_cpu_pages *pcp);
+extern bool bulkfree_pcp_prepare(struct page *page);
+extern void prefetch_buddy(struct page *page);
+extern inline void __free_one_page(struct page *page,
+                unsigned long pfn,
+                struct zone *zone, unsigned int order,
+                int migratetype, fpi_t fpi_flags);
+
+KTDEF(zone_spinlock);
+EXPORT_SYMBOL(zone_spinlock_clock);
+KTDEF(__free_one_page);
+EXPORT_SYMBOL(__free_one_page_clock);
+
+
+/*
+ * Frees a number of pages from the PCP lists
+ * Assumes all pages on list are in same zone, and of same order.
+ * count is the number of pages to free.
+ *
+ * If the zone was previously in an "all pages pinned" state then look to
+ * see if this freeing clears that state.
+ *
+ * And clear the zone's pages_scanned counter, to hold off the "all pages are
+ * pinned" detection logic.
+ */
+static void lustre_free_pcppages_bulk(struct zone *zone, int count,
+					struct per_cpu_pages *pcp)
+{
+	int migratetype = 0;
+	int batch_free = 0;
+	int prefetch_nr = READ_ONCE(pcp->batch);
+	bool isolated_pageblocks;
+	struct page *page, *tmp;
+	LIST_HEAD(head);
+	ktime_t localclock[2];
+
+	/*
+	 * Ensure proper count is passed which otherwise would stuck in the
+	 * below while (list_empty(list)) loop.
+	 */
+	count = min(pcp->count, count);
+	while (count) {
+		struct list_head *list;
+
+		/*
+		 * Remove pages from lists in a round-robin fashion. A
+		 * batch_free count is maintained that is incremented when an
+		 * empty list is encountered.  This is so more pages are freed
+		 * off fuller lists instead of spinning excessively around empty
+		 * lists
+		 */
+		do {
+			batch_free++;
+			if (++migratetype == MIGRATE_PCPTYPES)
+				migratetype = 0;
+			list = &pcp->lists[migratetype];
+		} while (list_empty(list));
+
+		/* This is the only non-empty list. Free them all. */
+		if (batch_free == MIGRATE_PCPTYPES)
+			batch_free = count;
+
+		do {
+			page = list_last_entry(list, struct page, lru);
+			/* must delete to avoid corrupting pcp list */
+			list_del(&page->lru);
+			pcp->count--;
+
+			if (bulkfree_pcp_prepare(page))
+				continue;
+
+			list_add_tail(&page->lru, &head);
+
+			/*
+			 * We are going to put the page back to the global
+			 * pool, prefetch its buddy to speed up later access
+			 * under zone->lock. It is believed the overhead of
+			 * an additional test and calculating buddy_pfn here
+			 * can be offset by reduced memory latency later. To
+			 * avoid excessive prefetching due to large count, only
+			 * prefetch buddy for the first pcp->batch nr of pages.
+			 */
+			if (prefetch_nr) {
+				prefetch_buddy(page);
+				prefetch_nr--;
+			}
+		} while (--count && --batch_free && !list_empty(list));
+	}
+
+	ktget(&localclock[0]);
+	spin_lock(&zone->lock);
+	ktget(&localclock[1]);
+	ktput(localclock, zone_spinlock);
+	isolated_pageblocks = has_isolate_pageblock(zone);
+
+	/*
+	 * Use safe version since after __free_one_page(),
+	 * page->lru.next will not point to original list.
+	 */
+	list_for_each_entry_safe(page, tmp, &head, lru) {
+		int mt = get_pcppage_migratetype(page);
+		/* MIGRATE_ISOLATE page should not go to pcplists */
+		VM_BUG_ON_PAGE(is_migrate_isolate(mt), page);
+		/* Pageblock could have been isolated meanwhile */
+		if (unlikely(isolated_pageblocks))
+			mt = get_pageblock_migratetype(page);
+
+		ktget(&localclock[0]);
+		__free_one_page(page, page_to_pfn(page), zone, 0, mt, FPI_NONE);
+		ktget(&localclock[1]);
+		ktput(localclock, __free_one_page);
+		//trace_mm_page_pcpu_drain(page, 0, mt);
+	}
+	spin_unlock(&zone->lock);
+}
+
+KTDEF(free_pcppages_bulk);
+EXPORT_SYMBOL(free_pcppages_bulk_clock);
+
+static void lustre_free_unref_page_commit(struct page *page, unsigned long pfn)
+{
+	struct zone *zone = page_zone(page);
+	struct per_cpu_pages *pcp;
+	int migratetype;
+	ktime_t localclock[2];
+
+	migratetype = get_pcppage_migratetype(page);
+	__count_vm_event(PGFREE);
+
+	/*
+	 * We only track unmovable, reclaimable and movable on pcp lists.
+	 * Free ISOLATE pages back to the allocator because they are being
+	 * offlined but treat HIGHATOMIC as movable pages so we can get those
+	 * areas back if necessary. Otherwise, we may have to free
+	 * excessively into the page allocator
+	 */
+	if (migratetype >= MIGRATE_PCPTYPES) {
+		if (unlikely(is_migrate_isolate(migratetype))) {
+			free_one_page(zone, page, pfn, 0, migratetype,
+				      FPI_NONE);
+			return;
+		}
+		migratetype = MIGRATE_MOVABLE;
+	}
+
+	pcp = &this_cpu_ptr(zone->pageset)->pcp;
+	list_add(&page->lru, &pcp->lists[migratetype]);
+	pcp->count++;
+	if (pcp->count >= READ_ONCE(pcp->high)){
+		ktget(&localclock[0]);
+		lustre_free_pcppages_bulk(zone, READ_ONCE(pcp->batch), pcp);
+		//free_pcppages_bulk(zone, READ_ONCE(pcp->batch), pcp);
+		ktget(&localclock[1]);
+		ktput(localclock, free_pcppages_bulk);
+	}
+}
+
+
+KTDEF(free_unref_page_prepare);
+EXPORT_SYMBOL(free_unref_page_prepare_clock);
+KTDEF(free_unref_page_commit);
+EXPORT_SYMBOL(free_unref_page_commit_clock);
+
+void lustre_free_unref_page_list(struct list_head *list)
+{
+	struct page *page, *next;
+	unsigned long flags, pfn;
+	int batch_count = 0;
+	ktime_t localclock[2];
+
+	/* Prepare pages for freeing */
+	list_for_each_entry_safe(page, next, list, lru) {
+		pfn = page_to_pfn(page);
+		ktget(&localclock[0]);
+		if (!free_unref_page_prepare(page, pfn))
+			list_del(&page->lru);
+		ktget(&localclock[1]);
+		ktput(localclock, free_unref_page_prepare);
+		set_page_private(page, pfn);
+	}
+
+	local_irq_save(flags);
+	list_for_each_entry_safe(page, next, list, lru) {
+		unsigned long pfn = page_private(page);
+
+		set_page_private(page, 0);
+		//trace_mm_page_free_batched(page);
+		ktget(&localclock[0]);
+		lustre_free_unref_page_commit(page, pfn);
+		//free_unref_page_commit(page, pfn);
+		ktget(&localclock[1]);
+		ktput(localclock, free_unref_page_commit);
+
+		/*
+		 * Guard against excessive IRQ disabled times when we get
+		 * a large list of pages to free.
+		 */
+		if (++batch_count == SWAP_CLUSTER_MAX) {
+			local_irq_restore(flags);
+			batch_count = 0;
+			local_irq_save(flags);
+		}
+	}
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL(lustre_free_unref_page_list);
+
+
+
 KTDEF(try_to_free_pages);
+
+extern unsigned long lustre_try_to_free_pages(struct zonelist *zonelist, int order,
+		gfp_t gfp_mask, nodemask_t *nodemask);
 
 /* Perform direct synchronous page reclaim */
 static int
@@ -4516,8 +4736,10 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 	noreclaim_flag = memalloc_noreclaim_save();
 
 	ktget(&localclock[0]);
-	progress = try_to_free_pages(ac->zonelist, order, gfp_mask,
+	progress = lustre_try_to_free_pages(ac->zonelist, order, gfp_mask,
 								ac->nodemask);
+	//progress = try_to_free_pages(ac->zonelist, order, gfp_mask,
+	//							ac->nodemask);
 	ktget(&localclock[1]);
 	ktput(localclock, try_to_free_pages);
 

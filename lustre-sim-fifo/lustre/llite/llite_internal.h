@@ -1917,4 +1917,9 @@ bool ll_foreign_is_removable(struct dentry *dentry, bool unset);
 
 int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 
+/* ych	*/
+unsigned long lustre_try_to_free_pages(struct zonelist *zonelist, int order,
+		gfp_t gfp_mask, nodemask_t *nodemask);
+/* ych	*/
+
 #endif /* LLITE_INTERNAL_H */
