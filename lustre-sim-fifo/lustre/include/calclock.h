@@ -11,7 +11,7 @@
 #include <linux/percpu.h>
 #include "lockfree_list.h"
 
-//#define CONFIG_CALCLOCK
+#define CONFIG_CALCLOCK
 
 struct calclock {
 	ktime_t time;

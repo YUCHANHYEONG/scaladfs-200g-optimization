@@ -965,6 +965,10 @@ restart:
 }
 EXPORT_SYMBOL(osc_lock_enqueue_wait);
 
+
+KTDEF(osc_lock_enqueue_wait);
+EXPORT_SYMBOL(osc_lock_enqueue_wait_clock);
+
 KTDEF(osc_lock_enqueue);
 EXPORT_SYMBOL(osc_lock_enqueue_clock);
 
@@ -1032,7 +1036,10 @@ static int osc_lock_enqueue_internal(const struct lu_env *env,
 		GOTO(enqueue_base, 0);
 	}
 
+	ktget(&localclock[0]);
 	result = osc_lock_enqueue_wait(env, osc, oscl);
+	ktget(&localclock[1]);
+	ktput(localclock, osc_lock_enqueue_wait);
 
 	if (result < 0)
 		GOTO(out, result);

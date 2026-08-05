@@ -1245,8 +1245,8 @@ void ll_lli_init(struct ll_inode_info *lli)
 		lli->lli_sa_enabled = 0;
 		init_rwsem(&lli->lli_lsm_sem);
 	} else {
-		mutex_init(&lli->lli_size_mutex);
-		//spin_lock_init(&lli->lli_size_spin);
+		//mutex_init(&lli->lli_size_mutex);
+		spin_lock_init(&lli->lli_size_spin);
 		mutex_init(&lli->lli_setattr_mutex);
 		lli->lli_symlink_name = NULL;
 		ll_trunc_sem_init(&lli->lli_trunc_sem);
@@ -2675,8 +2675,8 @@ void lustre_ll_inode_size_lock(struct inode *inode)
 	lli = ll_i2info(inode);
 
 	ktget(&localclock[0]);
-	mutex_lock(&lli->lli_size_mutex);
-	//spin_lock(&lli->lli_size_spin);
+	//mutex_lock(&lli->lli_size_mutex);
+	spin_lock(&lli->lli_size_spin);
 	ktget(&localclock[1]);
 	ktput(localclock, lli_size_mutex);
 	
@@ -2710,8 +2710,8 @@ void ll_inode_size_lock(struct inode *inode)
 
 	lli = ll_i2info(inode);
 
-	mutex_lock(&lli->lli_size_mutex);
-	//spin_lock(&lli->lli_size_spin);
+	//mutex_lock(&lli->lli_size_mutex);
+	spin_lock(&lli->lli_size_spin);
 	lli->lli_size_lock_owner = current;
 }
 
@@ -2721,8 +2721,8 @@ void ll_inode_size_unlock(struct inode *inode)
 
 	lli = ll_i2info(inode);
 	lli->lli_size_lock_owner = NULL;
-	mutex_unlock(&lli->lli_size_mutex);
-	//spin_unlock(&lli->lli_size_spin);
+	//mutex_unlock(&lli->lli_size_mutex);
+	spin_unlock(&lli->lli_size_spin);
 }
 
 int ll_inode_size_trylock(struct inode *inode)
@@ -2732,8 +2732,8 @@ int ll_inode_size_trylock(struct inode *inode)
 	LASSERT(!S_ISDIR(inode->i_mode));
 
 	lli = ll_i2info(inode);
-	return mutex_trylock(&lli->lli_size_mutex);
-	//return spin_trylock(&lli->lli_size_spin);
+	//return mutex_trylock(&lli->lli_size_mutex);
+	return spin_trylock(&lli->lli_size_spin);
 }
 
 void ll_update_inode_flags(struct inode *inode, unsigned int ext_flags)

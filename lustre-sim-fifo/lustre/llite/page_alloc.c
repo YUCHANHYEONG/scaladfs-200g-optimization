@@ -4495,6 +4495,8 @@ EXPORT_SYMBOL_GPL(fs_reclaim_release);
 
 #endif /*Kiet*/
 
+KTDEF(try_to_free_pages);
+
 /* Perform direct synchronous page reclaim */
 static int
 __perform_reclaim(gfp_t gfp_mask, unsigned int order,
@@ -4503,6 +4505,7 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 	int progress;
 	unsigned int noreclaim_flag;
 	unsigned long pflags;
+	ktime_t localclock[2];
 
 	cond_resched();
 
@@ -4512,8 +4515,11 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 	fs_reclaim_acquire(gfp_mask);
 	noreclaim_flag = memalloc_noreclaim_save();
 
+	ktget(&localclock[0]);
 	progress = try_to_free_pages(ac->zonelist, order, gfp_mask,
 								ac->nodemask);
+	ktget(&localclock[1]);
+	ktput(localclock, try_to_free_pages);
 
 	memalloc_noreclaim_restore(noreclaim_flag);
 	fs_reclaim_release(gfp_mask);
@@ -4524,6 +4530,8 @@ __perform_reclaim(gfp_t gfp_mask, unsigned int order,
 	return progress;
 }
 
+KTDEF(__perform_reclaim);
+EXPORT_SYMBOL(__perform_reclaim);
 
 /* The really slow allocator path where we enter direct reclaim */
 static inline struct page *
@@ -4533,8 +4541,12 @@ __alloc_pages_direct_reclaim(gfp_t gfp_mask, unsigned int order,
 {
 	struct page *page = NULL;
 	bool drained = false;
+	ktime_t localclock[2];
 
+	ktget(&localclock[0]);
 	*did_some_progress = __perform_reclaim(gfp_mask, order, ac);
+	ktget(&localclock[1]);
+	ktput(localclock, __perform_reclaim);
 	if (unlikely(!(*did_some_progress)))
 		return NULL;
 

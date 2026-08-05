@@ -1374,7 +1374,7 @@ void wb_start_background_writeback(struct bdi_writeback *wb)
 #endif /*Kiet*/
 
 /* ych	*/
-extern int MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
+extern void MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
 /* ych	*/
 
 /*
@@ -2613,7 +2613,6 @@ static long lustre_wb_writeback(struct bdi_writeback *wb,
 
 		/* ych	*/
 		lustre_iput(inode);
-		inode = NULL;
 		/* ych	*/
 
 		/*

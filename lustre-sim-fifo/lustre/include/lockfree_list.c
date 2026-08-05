@@ -139,41 +139,30 @@ static inline u32 hash_list_head(const struct list_head *list)
 #endif
 
 /* ych	*/
-int MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode)
+void MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode)
 {
 	struct LNode *cur;
 	struct LNode *next;
-	int nr_marked = 0;
 
 #if HASH_MODE
 	int i;
 
 	if (!list_rl || !inode)
-		return 0;
+		return;
 
 	i = hash_list_head(inode);
 
-restart:
 	rcu_read_lock();
 	cur = list_rl->head[i];
 #else
 	if (!list_rl || !inode)
-		return 0;
+		return;
 
-restart:
 	rcu_read_lock();
 	cur = list_rl->head;
 #endif
 
-	while (true) {
-		if (!cur)
-			break;
-
-		if (marked(cur)) {
-			rcu_read_unlock();
-			goto restart;
-		}
-
+	while (cur) {
 		next = cur->next;
 
 		if (marked(next)) {
@@ -182,17 +171,12 @@ restart:
 		}
 
 		if (cur->inode == inode) {
-			if (TryMarkNode(cur))
-				nr_marked++;
-
+			TryMarkNode(cur);
 			next = cur->next;
 		}
-
 		cur = unmark(next);
 	}
-
 	rcu_read_unlock();
-	return nr_marked;
 }
 EXPORT_SYMBOL(MarkInodeNodes);
 /* ych	*/

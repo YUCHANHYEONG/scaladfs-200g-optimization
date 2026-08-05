@@ -383,6 +383,7 @@ KTDEC(cl_lockset_lock);
 
 KTDEC(cl_lock_enqueue);
 KTDEC(osc_lock_enqueue);
+KTDEC(osc_lock_enqueue_wait);
 KTDEC(osc_enqueue_base);
 KTDEC(ldlm_handle2lock);
 KTDEC(ldlm_resource_get);
@@ -530,6 +531,8 @@ KTDEC(get_page_from_freelist_1);
 KTDEC(__alloc_pages_direct_compact);
 KTDEC(get_page_from_freelist_2);
 KTDEC(__alloc_pages_direct_reclaim);
+KTDEC(__perform_reclaim);
+KTDEC(try_to_free_pages);
 
 KTDEC(get_page_from_freelist);
 KTDEC(prepare_alloc_pages);
@@ -732,6 +735,7 @@ static void __exit lustre_exit(void)
 	ktprint(6, cl_lock_init);
 	ktprint(6, cl_lock_enqueue);
 	ktprint(7, osc_lock_enqueue);
+	ktprint(8, osc_lock_enqueue_wait);
 	ktprint(8, osc_enqueue_base);
 	ktprint(9, ldlm_lock_match_with_skip);
 	//ktprint(10, sptlrpc_import_check_ctx);
@@ -794,6 +798,8 @@ static void __exit lustre_exit(void)
 	ktprint(13, __alloc_pages_direct_compact);
 	ktprint(13, get_page_from_freelist_2);
 	ktprint(13, __alloc_pages_direct_reclaim);
+	ktprint(14, __perform_reclaim);
+	ktprint(15, try_to_free_pages);
 	ktprint(12, get_page_from_freelist);
 	ktprint(11, __page_cache_alloc);
 	ktprint(10, add_to_page_cache_lru);

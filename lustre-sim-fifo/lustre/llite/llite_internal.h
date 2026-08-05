@@ -205,8 +205,8 @@ struct ll_inode_info {
 
 		/* for non-directory */
 		struct {
-			struct mutex		lli_size_mutex;
-			//spinlock_t		lli_size_spin;
+			//struct mutex		lli_size_mutex;
+			spinlock_t		lli_size_spin;
 			struct task_struct	*lli_size_lock_owner;
 			char			*lli_symlink_name;
 			struct ll_trunc_sem	lli_trunc_sem;
