@@ -1936,6 +1936,9 @@ unsigned long lustre_try_to_free_pages(struct zonelist *zonelist, int order,
 		gfp_t gfp_mask, nodemask_t *nodemask);
 void ll_page_pool_init(struct ll_page_pool *pool);
 void ll_page_pool_fini(struct ll_page_pool *pool);
+
+struct page *ll_page_pool_get(struct ll_page_pool *pool);
+bool ll_page_pool_put(struct ll_page_pool *pool, struct page *page);
 /* ych	*/
 
 #endif /* LLITE_INTERNAL_H */
