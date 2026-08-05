@@ -45,6 +45,11 @@
 #include <linux/page_idle.h>
 #include <linux/migrate.h>
 #include "../include/calclock.h"
+
+/* ych	*/
+#include "llite_internal.h"
+/* ych	*/
+
 // #include "internal.h"
 
 // #define CREATE_TRACE_POINTS
@@ -2038,17 +2043,40 @@ repeat:
 
 no_page:
 	if (!page && (fgp_flags & FGP_CREAT)) {
+		/* ych	*/
+		struct ll_sb_info *sbi;
+		bool from_pool = false;
+		/* ych	*/
 		int err;
+
+		/* ych	*/
+		sbi = ll_i2sbi(mapping->host);
+		/* ych	*/
+
 		if ((fgp_flags & FGP_WRITE) && mapping_can_writeback(mapping))
 			gfp_mask |= __GFP_WRITE;
 		if (fgp_flags & FGP_NOFS)
 			gfp_mask &= ~__GFP_FS;
 
-		ktget(&localclock[0]);
-		page = __lustre_page_cache_alloc(gfp_mask);
-		// page = (struct page*)mempool_alloc(lustre_mempool, gfp_mask);
-		ktget(&localclock[1]);
-		ktput(localclock, page_cache_alloc);
+		/* ych	*/
+		/* 
+		 * Try the ScalaDFS page pool first
+		 */
+		page = ll_page_pool_get(&sbi->ll_page_pool);
+		if (page) {
+			from_pool = true;
+		} else {
+			/* 
+			 * Fall back to the buddy allocator.
+			 */
+			ktget(&localclock[0]);
+			page = __lustre_page_cache_alloc(gfp_mask);
+			// page = (struct page*)mempool_alloc(lustre_mempool, gfp_mask);
+			ktget(&localclock[1]);
+			ktput(localclock, page_cache_alloc);
+		}
+		/* ych	*/
+
 		if (!page)
 			return NULL;
 
@@ -2063,12 +2091,31 @@ no_page:
 		err = lustre_add_to_page_cache_lru(page, mapping, index, gfp_mask);
 		ktget(&localclock[1]);
 		ktput(localclock, add_to_page_cache_lru);
+
+		/* ych	*/
+		//if (unlikely(err)) {
+		//	put_page(page);
+		//	page = NULL;
+		//	if (err == -EEXIST)
+		//		goto repeat;
+		//}
 		if (unlikely(err)) {
-			put_page(page);
+			/*
+			 * Retrun a reused page to the pool if insertion fails.
+			 */
+			if (from_pool) {
+				if (!ll_page_pool_put(&sbi->ll_page_pool, page))
+					put_page(page);
+			} else {
+				put_page(page);
+			}
+
 			page = NULL;
+
 			if (err == -EEXIST)
 				goto repeat;
 		}
+		/* ych	*/
 
 		/*
 		 * add_to_page_cache_lru locks the page, and for mmap we expect

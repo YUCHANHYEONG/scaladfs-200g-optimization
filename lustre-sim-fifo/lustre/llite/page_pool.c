@@ -52,6 +52,8 @@ void ll_page_pool_fini(struct ll_page_pool *pool)
 struct page *ll_page_pool_get(struct ll_page_pool *pool)
 {
 	struct page *page = NULL;
+	printk_once("[%s] start! from %ps\n",
+			__func__, __builtin_return_address(0));
 
 	spin_lock(&pool->lpp_lock);
 
