@@ -9,7 +9,7 @@ lustre-objs += lcommon_misc.o
 lustre-objs += vvp_dev.o vvp_page.o vvp_io.o vvp_object.o
 lustre-objs += pcc.o crypto.o
 lustre-objs += llite_foreign.o llite_foreign_symlink.o
-lustre-objs += filemap.o mempolicy.o vmscan.o
+lustre-objs += filemap.o mempolicy.o vmscan.o page_pool.o
 lustre-objs += page_alloc.o ../include/calclock.o
 
 lustre-$(CONFIG_FS_POSIX_ACL) += acl.o

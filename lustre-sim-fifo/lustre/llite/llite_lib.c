@@ -110,6 +110,9 @@ static struct ll_sb_info *ll_init_sbi(struct lustre_sb_info *lsi)
 	mutex_init(&sbi->ll_lco.lco_lock);
 	spin_lock_init(&sbi->ll_pp_extent_lock);
 	spin_lock_init(&sbi->ll_process_lock);
+	/* ych	*/
+	ll_page_pool_init(&sbi->ll_page_pool);
+	/* ych	*/
 	sbi->lsi = lsi;
 	sbi->ll_rw_stats_on = 0;
 	sbi->ll_statfs_max_age = OBD_STATFS_CACHE_SECONDS;
@@ -269,6 +272,9 @@ static void ll_free_sbi(struct super_block *sb)
 
 		ll_free_rw_stats_info(sbi);
 		pcc_super_fini(&sbi->ll_pcc_super);
+		/* ych	*/
+		ll_page_pool_fini(&sbi->ll_page_pool);
+		/* ych	*/
 		OBD_FREE(sbi, sizeof(*sbi));
 	}
 	EXIT;

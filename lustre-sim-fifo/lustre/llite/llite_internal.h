@@ -787,6 +787,16 @@ struct lustre_client_ocd {
 	struct obd_export	*lco_dt_exp;
 };
 
+/* ych	*/
+struct ll_page_pool {
+	spinlock_t	lpp_lock;
+	struct list_head	lpp_pages;
+
+	unsigned long	lpp_nr_pages;
+	unsigned long	lpp_max_pages;
+};
+/* ych	*/
+
 struct ll_sb_info {
 	/* this protects pglist and ra_info.  It isn't safe to
 	 * grab from interrupt contexts */
@@ -909,6 +919,10 @@ struct ll_sb_info {
 	/* cached file security context xattr name. e.g: security.selinux */
 	char *ll_secctx_name;
 	__u32 ll_secctx_name_size;
+	
+	/* ych	*/
+	struct ll_page_pool	ll_page_pool;
+	/* ych	*/
 };
 
 #define SBI_DEFAULT_HEAT_DECAY_WEIGHT	((80 * 256 + 50) / 100)
@@ -1920,6 +1934,8 @@ int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 /* ych	*/
 unsigned long lustre_try_to_free_pages(struct zonelist *zonelist, int order,
 		gfp_t gfp_mask, nodemask_t *nodemask);
+void ll_page_pool_init(struct ll_page_pool *pool);
+void ll_page_pool_fini(struct ll_page_pool *pool);
 /* ych	*/
 
 #endif /* LLITE_INTERNAL_H */
