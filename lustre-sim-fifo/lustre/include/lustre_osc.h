@@ -319,9 +319,11 @@ struct osc_object {
 	bool			oo_initialized;
 
 	/* ych: full PW fast path	*/
-	bool			oo_full_pw_granted;
+	atomic_t		oo_full_pw_granted;
 	struct ldlm_lock	*oo_full_pw_lock;
 	atomic_t		oo_fast_users;
+	wait_queue_head_t	oo_fast_waitq;
+	/* ych	*/
 };
 
 static inline void osc_build_res_name(struct osc_object *osc,

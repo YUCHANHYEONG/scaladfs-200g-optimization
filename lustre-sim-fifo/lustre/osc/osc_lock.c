@@ -287,7 +287,7 @@ static void osc_lock_granted(const struct lu_env *env, struct osc_lock *oscl,
 				ext->end == OBD_OBJECT_EOF) {
 			if (osc->oo_full_pw_lock == NULL) {
 				osc->oo_full_pw_lock = LDLM_LOCK_GET(dlmlock);
-				osc->oo_full_pw_granted = true;
+				atomic_set(&osc->oo_full_pw_granted, 1);
 			}
 		}
 		/* ych	*/
@@ -556,6 +556,23 @@ static int osc_ldlm_blocking_ast(struct ldlm_lock *dlmlock,
 	switch (flag) {
 	case LDLM_CB_BLOCKING: {
 		struct lustre_handle lockh;
+		/* ych	*/
+		struct osc_object *osc = data;
+
+		if (osc != NULL &&
+				osc->oo_full_pw_lock == dlmlock) {
+			atomic_set(&osc->oo_full_pw_granted, 0);
+
+			smp_mb();
+
+			wait_event(osc->oo_fast_waitq, atomic_read(&osc->oo_fast_users) == 0);
+
+			if (osc->oo_full_pw_lock == dlmlock) {
+				LDLM_LOCK_PUT(osc->oo_full_pw_lock);
+				osc->oo_full_pw_lock = NULL;
+			}
+		}
+		/* ych	*/
 
 		ldlm_lock2handle(dlmlock, &lockh);
 		result = ldlm_cli_cancel(&lockh, LCF_ASYNC);

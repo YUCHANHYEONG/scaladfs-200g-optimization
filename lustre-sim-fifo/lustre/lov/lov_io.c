@@ -1082,19 +1082,40 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
-		if (!osc->oo_full_pw_granted) {
+		if (!atomic_read(&osc->oo_full_pw_granted)) {
 			fast_path = false;
 			break;
 		}
 	}
 
 	if (fast_path) {
+		struct osc_io *oio;
+		struct osc_object *osc;
+
+		if (!list_is_singular(&lio->lis_active))
+			goto normal;
+
+		sub = list_first_entry(&lio->lis_active, struct lov_io_sub, sub_linkage);
+
+		oio = osc_env_io(sub->sub_env);
+		osc = cl2osc(oio->oi_cl.cis_obj);
+
+		if (!atomic_read(&osc->oo_full_pw_granted))
+			goto normal;
+
+		atomic_inc(&osc->oo_fast_users);
+
+		smp_mb__after_atomic();
+
+		if (!atomic_read(&osc->oo_full_pw_granted)) {
+			if (atomic_dec_and_test(&osc->oo_fast_users))
+				wake_up_all(&osc->oo_fast_waitq);
+
+			goto normal;
+		}
+
 		io->ci_fast_pw = 1;
-
-		list_for_each_entry(sub, &lio->lis_active, sub_linkage)
-			sub->sub_io.ci_fast_pw = 1;
-
-		//printk("[%s] FULL PW FAST PATH\n", __func__);
+		sub->sub_io.ci_fast_pw = 1;
 
 		RETURN(0);
 	}
@@ -1227,8 +1248,37 @@ static void lov_io_unlock(const struct lu_env *env,
                           const struct cl_io_slice *ios)
 {
 	int rc;
+	/* ych	*/
+	struct lov_io *lio = cl2lov_io(env, ios);
+	struct cl_io *io = ios->cis_io;
+	struct lov_io_sub *sub;
+	/* ych	*/
 
 	ENTRY;
+
+	/* ych	*/
+	if (io->ci_fast_pw) {
+		struct osc_io *oio;
+		struct osc_object *osc;
+
+		LASSERT(list_is_singular(&lio->lis_active));
+
+		sub = list_first_entry(&lio->lis_active, struct lov_io_sub, sub_linkage);
+
+		oio = osc_env_io(sub->sub_env);
+		osc = cl2osc(oio->oi_cl.cis_obj);
+
+		io->ci_fast_pw = 0;
+		sub->sub_io.ci_fast_pw = 0;
+
+		if (atomic_dec_and_test(&osc->oo_fast_users))
+			wake_up_all(&osc->oo_fast_waitq);
+
+		EXIT;
+		return;
+	}
+	/* ych	*/
+
 	rc = lov_io_call(env, cl2lov_io(env, ios), lov_io_unlock_wrapper);
 	LASSERT(rc == 0);
 	EXIT;
