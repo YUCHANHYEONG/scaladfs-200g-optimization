@@ -2670,6 +2670,7 @@ bool can_split_huge_page(struct page *page, int *pextra_pins)
 		*pextra_pins = extra_pins;
 	return total_mapcount(page) == page_count(page) - extra_pins - 1;
 }
+EXPORT_SYMBOL(can_split_huge_page);
 
 /*
  * This function splits huge page into normal pages. @page can point to any
@@ -2826,6 +2827,7 @@ out:
 	count_vm_event(!ret ? THP_SPLIT_PAGE : THP_SPLIT_PAGE_FAILED);
 	return ret;
 }
+EXPORT_SYMBOL(split_huge_page_to_list);
 
 void free_transhuge_page(struct page *page)
 {

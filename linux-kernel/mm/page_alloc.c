@@ -319,6 +319,7 @@ compound_page_dtor * const compound_page_dtors[] = {
 	free_transhuge_page,
 #endif
 };
+EXPORT_SYMBOL(compound_page_dtors);
 
 int min_free_kbytes = 1024;
 int user_min_free_kbytes = -1;
@@ -1021,7 +1022,7 @@ buddy_merge_likely(unsigned long pfn, unsigned long buddy_pfn,
  * -- nyc
  */
 
-static inline void __free_one_page(struct page *page,
+inline void __free_one_page(struct page *page,
 		unsigned long pfn,
 		struct zone *zone, unsigned int order,
 		int migratetype, fpi_t fpi_flags)
@@ -1116,6 +1117,7 @@ done_merging:
 	if (!(fpi_flags & FPI_SKIP_REPORT_NOTIFY))
 		page_reporting_notify_free(order);
 }
+EXPORT_SYMBOL(__free_one_page);
 
 /*
  * A bad page could be due to a number of fields. Instead of multiple branches,
@@ -1334,13 +1336,14 @@ static bool free_pcp_prepare(struct page *page)
 	return free_pages_prepare(page, 0, true);
 }
 
-static bool bulkfree_pcp_prepare(struct page *page)
+bool bulkfree_pcp_prepare(struct page *page)
 {
 	if (debug_pagealloc_enabled_static())
 		return check_free_page(page);
 	else
 		return false;
 }
+EXPORT_SYMBOL(bulkfree_pcp_prepare);
 #else
 /*
  * With DEBUG_VM disabled, order-0 pages being freed are checked only when
@@ -1356,13 +1359,14 @@ static bool free_pcp_prepare(struct page *page)
 		return free_pages_prepare(page, 0, false);
 }
 
-static bool bulkfree_pcp_prepare(struct page *page)
+bool bulkfree_pcp_prepare(struct page *page)
 {
 	return check_free_page(page);
 }
+EXPORT_SYMBOL(bulkfree_pcp_prepare);
 #endif /* CONFIG_DEBUG_VM */
 
-static inline void prefetch_buddy(struct page *page)
+void prefetch_buddy(struct page *page)
 {
 	unsigned long pfn = page_to_pfn(page);
 	unsigned long buddy_pfn = __find_buddy_pfn(pfn, 0);
@@ -1370,6 +1374,7 @@ static inline void prefetch_buddy(struct page *page)
 
 	prefetch(buddy);
 }
+EXPORT_SYMBOL(prefetch_buddy);
 
 /*
  * Frees a number of pages from the PCP lists
@@ -1382,7 +1387,7 @@ static inline void prefetch_buddy(struct page *page)
  * And clear the zone's pages_scanned counter, to hold off the "all pages are
  * pinned" detection logic.
  */
-static void free_pcppages_bulk(struct zone *zone, int count,
+void free_pcppages_bulk(struct zone *zone, int count,
 					struct per_cpu_pages *pcp)
 {
 	int migratetype = 0;
@@ -1465,8 +1470,9 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	}
 	spin_unlock(&zone->lock);
 }
+EXPORT_SYMBOL(free_pcppages_bulk);
 
-static void free_one_page(struct zone *zone,
+void free_one_page(struct zone *zone,
 				struct page *page, unsigned long pfn,
 				unsigned int order,
 				int migratetype, fpi_t fpi_flags)
@@ -1479,6 +1485,7 @@ static void free_one_page(struct zone *zone,
 	__free_one_page(page, pfn, zone, order, migratetype, fpi_flags);
 	spin_unlock(&zone->lock);
 }
+EXPORT_SYMBOL(free_one_page);
 
 static void __meminit __init_single_page(struct page *page, unsigned long pfn,
 				unsigned long zone, int nid)
@@ -3201,7 +3208,7 @@ void mark_free_pages(struct zone *zone)
 }
 #endif /* CONFIG_PM */
 
-static bool free_unref_page_prepare(struct page *page, unsigned long pfn)
+bool free_unref_page_prepare(struct page *page, unsigned long pfn)
 {
 	int migratetype;
 
@@ -3212,8 +3219,9 @@ static bool free_unref_page_prepare(struct page *page, unsigned long pfn)
 	set_pcppage_migratetype(page, migratetype);
 	return true;
 }
+EXPORT_SYMBOL(free_unref_page_prepare);
 
-static void free_unref_page_commit(struct page *page, unsigned long pfn)
+void free_unref_page_commit(struct page *page, unsigned long pfn)
 {
 	struct zone *zone = page_zone(page);
 	struct per_cpu_pages *pcp;
@@ -3244,6 +3252,7 @@ static void free_unref_page_commit(struct page *page, unsigned long pfn)
 	if (pcp->count >= READ_ONCE(pcp->high))
 		free_pcppages_bulk(zone, READ_ONCE(pcp->batch), pcp);
 }
+EXPORT_SYMBOL(free_unref_page_commit);
 
 /*
  * Free a 0-order page
@@ -3298,6 +3307,7 @@ void free_unref_page_list(struct list_head *list)
 	}
 	local_irq_restore(flags);
 }
+EXPORT_SYMBOL(free_unref_page_list);
 
 /*
  * split_page takes a non-compound higher-order page, and splits it into

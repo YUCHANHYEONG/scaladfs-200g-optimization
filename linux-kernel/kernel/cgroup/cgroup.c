@@ -4220,6 +4220,7 @@ void cgroup_file_notify(struct cgroup_file *cfile)
 	}
 	spin_unlock_irqrestore(&cgroup_file_kn_lock, flags);
 }
+EXPORT_SYMBOL(cgroup_file_notify);
 
 /**
  * css_next_child - find the next child of a given css

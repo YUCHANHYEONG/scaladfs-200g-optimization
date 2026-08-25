@@ -459,7 +459,7 @@ static bool cgroup_reclaim(struct scan_control *sc)
  * This function tests whether the vmscan currently in progress can assume
  * that the normal dirty throttling mechanism is operational.
  */
-static bool writeback_throttling_sane(struct scan_control *sc)
+bool writeback_throttling_sane(struct scan_control *sc)
 {
 	if (!cgroup_reclaim(sc))
 		return true;
@@ -469,6 +469,7 @@ static bool writeback_throttling_sane(struct scan_control *sc)
 #endif
 	return false;
 }
+EXPORT_SYMBOL(writeback_throttling_sane);
 #else
 static int prealloc_memcg_shrinker(struct shrinker *shrinker)
 {
@@ -875,7 +876,7 @@ static unsigned long shrink_slab_memcg(gfp_t gfp_mask, int nid,
  *
  * Returns the number of reclaimed slab objects.
  */
-static unsigned long shrink_slab(gfp_t gfp_mask, int nid,
+unsigned long shrink_slab(gfp_t gfp_mask, int nid,
 				 struct mem_cgroup *memcg,
 				 int priority)
 {
@@ -922,6 +923,7 @@ out:
 	cond_resched();
 	return freed;
 }
+EXPORT_SYMBOL(shrink_slab);
 
 void drop_slab_node(int nid)
 {
@@ -1137,7 +1139,7 @@ typedef enum {
  * pageout is called by shrink_page_list() for each dirty page.
  * Calls ->writepage().
  */
-static pageout_t pageout(struct page *page, struct address_space *mapping)
+pageout_t pageout(struct page *page, struct address_space *mapping)
 {
 	/*
 	 * If the page is dirty, only perform writeback if that write
@@ -1206,12 +1208,13 @@ static pageout_t pageout(struct page *page, struct address_space *mapping)
 
 	return PAGE_CLEAN;
 }
+EXPORT_SYMBOL(pageout);
 
 /*
  * Same as remove_mapping, but if the page is removed from the mapping, it
  * gets returned with a refcount of 0.
  */
-static int __remove_mapping(struct address_space *mapping, struct page *page,
+int __remove_mapping(struct address_space *mapping, struct page *page,
 			    bool reclaimed, struct mem_cgroup *target_memcg)
 {
 	unsigned long flags;
@@ -1300,6 +1303,7 @@ cannot_free:
 	xa_unlock_irqrestore(&mapping->i_pages, flags);
 	return 0;
 }
+EXPORT_SYMBOL(__remove_mapping);
 
 /*
  * Attempt to detach a locked page from its ->mapping.  If it is dirty or if
@@ -1343,7 +1347,7 @@ enum page_references {
 	PAGEREF_ACTIVATE,
 };
 
-static enum page_references page_check_references(struct page *page,
+enum page_references page_check_references(struct page *page,
 						  struct scan_control *sc)
 {
 	int referenced_ptes, referenced_page;
@@ -1395,9 +1399,10 @@ static enum page_references page_check_references(struct page *page,
 
 	return PAGEREF_RECLAIM;
 }
+EXPORT_SYMBOL(page_check_references);
 
 /* Check if a page is dirty or under writeback */
-static void page_check_dirty_writeback(struct page *page,
+void page_check_dirty_writeback(struct page *page,
 				       bool *dirty, bool *writeback)
 {
 	struct address_space *mapping;
@@ -1425,11 +1430,12 @@ static void page_check_dirty_writeback(struct page *page,
 	if (mapping && mapping->a_ops->is_dirty_writeback)
 		mapping->a_ops->is_dirty_writeback(page, dirty, writeback);
 }
+EXPORT_SYMBOL(page_check_dirty_writeback);
 
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
-static unsigned int shrink_page_list(struct list_head *page_list,
+unsigned int shrink_page_list(struct list_head *page_list,
 				     struct pglist_data *pgdat,
 				     struct scan_control *sc,
 				     struct reclaim_stat *stat,
@@ -1849,6 +1855,7 @@ keep:
 
 	return nr_reclaimed;
 }
+EXPORT_SYMBOL(shrink_page_list);
 
 unsigned int reclaim_clean_pages_from_list(struct zone *zone,
 					    struct list_head *page_list)
@@ -1993,7 +2000,7 @@ static __always_inline void update_lru_sizes(struct lruvec *lruvec,
  *
  * returns how many pages were moved onto *@dst.
  */
-static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
+unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		struct lruvec *lruvec, struct list_head *dst,
 		unsigned long *nr_scanned, struct scan_control *sc,
 		enum lru_list lru)
@@ -2091,6 +2098,7 @@ busy:
 	update_lru_sizes(lruvec, lru, nr_zone_taken);
 	return nr_taken;
 }
+EXPORT_SYMBOL(isolate_lru_pages);
 
 /**
  * isolate_lru_page - tries to isolate a page from its LRU list
@@ -2145,7 +2153,7 @@ int isolate_lru_page(struct page *page)
  * the LRU list will go small and be scanned faster than necessary, leading to
  * unnecessary swapping, thrashing and OOM.
  */
-static int too_many_isolated(struct pglist_data *pgdat, int file,
+int too_many_isolated(struct pglist_data *pgdat, int file,
 		struct scan_control *sc)
 {
 	unsigned long inactive, isolated;
@@ -2181,6 +2189,7 @@ static int too_many_isolated(struct pglist_data *pgdat, int file,
 
 	return too_many;
 }
+EXPORT_SYMBOL(too_many_isolated);
 
 /*
  * move_pages_to_lru() moves pages from private @list to appropriate LRU list.
@@ -2188,7 +2197,7 @@ static int too_many_isolated(struct pglist_data *pgdat, int file,
  *
  * Returns the number of pages moved to the given lruvec.
  */
-static unsigned int move_pages_to_lru(struct lruvec *lruvec,
+unsigned int move_pages_to_lru(struct lruvec *lruvec,
 				      struct list_head *list)
 {
 	int nr_pages, nr_moved = 0;
@@ -2251,6 +2260,7 @@ static unsigned int move_pages_to_lru(struct lruvec *lruvec,
 
 	return nr_moved;
 }
+EXPORT_SYMBOL(move_pages_to_lru);
 
 /*
  * If a kernel thread (such as nfsd for loop-back mounts) services
@@ -2258,18 +2268,19 @@ static unsigned int move_pages_to_lru(struct lruvec *lruvec,
  * In that case we should only throttle if the backing device it is
  * writing to is congested.  In other cases it is safe to throttle.
  */
-static int current_may_throttle(void)
+int current_may_throttle(void)
 {
 	return !(current->flags & PF_LOCAL_THROTTLE) ||
 		current->backing_dev_info == NULL ||
 		bdi_write_congested(current->backing_dev_info);
 }
+EXPORT_SYMBOL(current_may_throttle);
 
 /*
  * shrink_inactive_list() is a helper for shrink_node().  It returns the number
  * of reclaimed pages
  */
-static unsigned long
+unsigned long
 shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 		     struct scan_control *sc, enum lru_list lru)
 {
@@ -2371,6 +2382,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 			nr_scanned, nr_reclaimed, &stat, sc->priority, file);
 	return nr_reclaimed;
 }
+EXPORT_SYMBOL(shrink_inactive_list);
 
 /*
  * shrink_active_list() moves pages from the active LRU to the inactive LRU.
@@ -2389,7 +2401,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
  * The downside is that we have to touch page->_refcount against each page.
  * But we had to alter page->flags anyway.
  */
-static void shrink_active_list(unsigned long nr_to_scan,
+void shrink_active_list(unsigned long nr_to_scan,
 			       struct lruvec *lruvec,
 			       struct scan_control *sc,
 			       enum lru_list lru)
@@ -2485,6 +2497,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	trace_mm_vmscan_lru_shrink_active(pgdat->node_id, nr_taken, nr_activate,
 			nr_deactivate, nr_rotated, sc->priority, file);
 }
+EXPORT_SYMBOL(shrink_active_list);
 
 unsigned long reclaim_pages(struct list_head *page_list)
 {
@@ -2582,7 +2595,7 @@ static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
  *    1TB     101        10GB
  *   10TB     320        32GB
  */
-static bool inactive_is_low(struct lruvec *lruvec, enum lru_list inactive_lru)
+bool inactive_is_low(struct lruvec *lruvec, enum lru_list inactive_lru)
 {
 	enum lru_list active_lru = inactive_lru + LRU_ACTIVE;
 	unsigned long inactive, active;
@@ -2600,6 +2613,7 @@ static bool inactive_is_low(struct lruvec *lruvec, enum lru_list inactive_lru)
 
 	return inactive * inactive_ratio < active;
 }
+EXPORT_SYMBOL(inactive_is_low);
 
 enum scan_balance {
 	SCAN_EQUAL,
@@ -2617,7 +2631,7 @@ enum scan_balance {
  * nr[0] = anon inactive pages to scan; nr[1] = anon active pages to scan
  * nr[2] = file inactive pages to scan; nr[3] = file active pages to scan
  */
-static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 			   unsigned long *nr)
 {
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
@@ -2812,8 +2826,9 @@ out:
 		nr[lru] = scan;
 	}
 }
+EXPORT_SYMBOL(get_scan_count);
 
-static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
+void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	unsigned long nr[NR_LRU_LISTS];
 	unsigned long targets[NR_LRU_LISTS];
@@ -2924,6 +2939,7 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
 				   sc, LRU_ACTIVE_ANON);
 }
+EXPORT_SYMBOL(shrink_lruvec);
 
 /* Use reclaim/compaction for costly allocs or under memory pressure */
 static bool in_reclaim_compaction(struct scan_control *sc)
@@ -2943,7 +2959,7 @@ static bool in_reclaim_compaction(struct scan_control *sc)
  * calls try_to_compact_pages() that it will have enough free pages to succeed.
  * It will give up earlier than that if there is difficulty reclaiming pages.
  */
-static inline bool should_continue_reclaim(struct pglist_data *pgdat,
+bool should_continue_reclaim(struct pglist_data *pgdat,
 					unsigned long nr_reclaimed,
 					struct scan_control *sc)
 {
@@ -2995,8 +3011,9 @@ static inline bool should_continue_reclaim(struct pglist_data *pgdat,
 
 	return inactive_lru_pages > pages_for_compaction;
 }
+EXPORT_SYMBOL(should_continue_reclaim);
 
-static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
+void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 {
 	struct mem_cgroup *target_memcg = sc->target_mem_cgroup;
 	struct mem_cgroup *memcg;
@@ -3044,8 +3061,9 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 
 	} while ((memcg = mem_cgroup_iter(target_memcg, memcg, NULL)));
 }
+EXPORT_SYMBOL(shrink_node_memcgs);
 
-static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
+void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 {
 	struct reclaim_state *reclaim_state = current->reclaim_state;
 	unsigned long nr_reclaimed, nr_scanned;
@@ -3242,13 +3260,14 @@ again:
 	if (reclaimable)
 		pgdat->kswapd_failures = 0;
 }
+EXPORT_SYMBOL(shrink_node);
 
 /*
  * Returns true if compaction should go ahead for a costly-order request, or
  * the allocation would already succeed without compaction. Return false if we
  * should reclaim first.
  */
-static inline bool compaction_ready(struct zone *zone, struct scan_control *sc)
+bool compaction_ready(struct zone *zone, struct scan_control *sc)
 {
 	unsigned long watermark;
 	enum compact_result suitable;
@@ -3274,8 +3293,9 @@ static inline bool compaction_ready(struct zone *zone, struct scan_control *sc)
 
 	return zone_watermark_ok_safe(zone, 0, watermark, sc->reclaim_idx);
 }
+EXPORT_SYMBOL(compaction_ready);
 
-static void consider_reclaim_throttle(pg_data_t *pgdat, struct scan_control *sc)
+void consider_reclaim_throttle(pg_data_t *pgdat, struct scan_control *sc)
 {
 	/*
 	 * If reclaim is making progress greater than 12% efficiency then
@@ -3304,6 +3324,7 @@ static void consider_reclaim_throttle(pg_data_t *pgdat, struct scan_control *sc)
 	if (sc->priority == 1 && !sc->nr_reclaimed)
 		reclaim_throttle(pgdat, VMSCAN_THROTTLE_NOPROGRESS);
 }
+EXPORT_SYMBOL(consider_reclaim_throttle);
 
 /*
  * This is the direct reclaim path, for page-allocating processes.  We only
@@ -3313,7 +3334,7 @@ static void consider_reclaim_throttle(pg_data_t *pgdat, struct scan_control *sc)
  * If a zone is deemed to be full of pinned pages then just give it a light
  * scan then give up on it.
  */
-static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
+void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 {
 	struct zoneref *z;
 	struct zone *zone;
@@ -3404,8 +3425,9 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 	 */
 	sc->gfp_mask = orig_mask;
 }
+EXPORT_SYMBOL(shrink_zones);
 
-static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
+void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
 {
 	struct lruvec *target_lruvec;
 	unsigned long refaults;
@@ -3416,6 +3438,7 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
 	refaults = lruvec_page_state(target_lruvec, WORKINGSET_ACTIVATE_FILE);
 	target_lruvec->refaults[1] = refaults;
 }
+EXPORT_SYMBOL(snapshot_refaults);
 
 /*
  * This is the main entry point to direct page reclaim.

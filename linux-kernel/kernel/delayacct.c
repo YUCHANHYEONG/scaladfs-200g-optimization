@@ -162,6 +162,7 @@ void __delayacct_freepages_start(void)
 {
 	current->delays->freepages_start = ktime_get_ns();
 }
+EXPORT_SYMBOL(__delayacct_freepages_start);
 
 void __delayacct_freepages_end(void)
 {
@@ -171,6 +172,7 @@ void __delayacct_freepages_end(void)
 		&current->delays->freepages_delay,
 		&current->delays->freepages_count);
 }
+EXPORT_SYMBOL(__delayacct_freepages_end);
 
 void __delayacct_thrashing_start(bool *in_thrashing)
 {

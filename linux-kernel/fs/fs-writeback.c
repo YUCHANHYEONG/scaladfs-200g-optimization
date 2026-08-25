@@ -2355,6 +2355,7 @@ void wakeup_flusher_threads(enum wb_reason reason)
 		__wakeup_flusher_threads_bdi(bdi, reason);
 	rcu_read_unlock();
 }
+EXPORT_SYMBOL(wakeup_flusher_threads);
 
 /*
  * Wake up bdi's periodically to make sure dirtytime inodes gets

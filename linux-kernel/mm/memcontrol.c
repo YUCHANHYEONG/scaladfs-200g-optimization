@@ -793,6 +793,7 @@ void mem_cgroup_flush_stats(void)
 	if (atomic_read(&stats_flush_threshold) > num_online_cpus())
 		__mem_cgroup_flush_stats();
 }
+EXPORT_SYMBOL(mem_cgroup_flush_stats);
 
 void mem_cgroup_flush_stats_delayed(void)
 {
@@ -998,6 +999,7 @@ void __count_memcg_events(struct mem_cgroup *memcg, enum vm_event_item idx,
 	memcg_rstat_updated(memcg, count);
 	memcg_stats_unlock();
 }
+EXPORT_SYMBOL(__count_memcg_events);
 
 static unsigned long memcg_events(struct mem_cgroup *memcg, int event)
 {
@@ -1279,6 +1281,7 @@ out_unlock:
 
 	return memcg;
 }
+EXPORT_SYMBOL(mem_cgroup_iter);
 
 /**
  * mem_cgroup_iter_break - abort a hierarchy walk prematurely
@@ -3660,6 +3663,7 @@ unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 		css_put(&next_mz->memcg->css);
 	return nr_reclaimed;
 }
+EXPORT_SYMBOL(mem_cgroup_soft_limit_reclaim);
 
 /*
  * Reclaims as many pages from the given memcg as possible.
@@ -6989,6 +6993,7 @@ void mem_cgroup_calculate_protection(struct mem_cgroup *root,
 			READ_ONCE(parent->memory.elow),
 			atomic_long_read(&parent->memory.children_low_usage)));
 }
+EXPORT_SYMBOL(mem_cgroup_calculate_protection);
 
 static int __mem_cgroup_charge(struct page *page, struct mem_cgroup *memcg,
 			       gfp_t gfp)
@@ -7251,6 +7256,7 @@ void mem_cgroup_uncharge_list(struct list_head *page_list)
 	if (ug.memcg)
 		uncharge_batch(&ug);
 }
+EXPORT_SYMBOL(mem_cgroup_uncharge_list);
 
 /**
  * mem_cgroup_migrate - charge a page's replacement
@@ -7653,6 +7659,7 @@ bool mem_cgroup_swap_full(struct page *page)
 
 	return false;
 }
+EXPORT_SYMBOL(mem_cgroup_swap_full);
 
 static int __init setup_swap_account(char *s)
 {

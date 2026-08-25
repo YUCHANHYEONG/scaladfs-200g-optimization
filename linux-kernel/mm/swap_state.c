@@ -239,6 +239,7 @@ fail:
 	put_swap_page(page, entry);
 	return 0;
 }
+EXPORT_SYMBOL(add_to_swap);
 
 /*
  * This must be called only on pages that have

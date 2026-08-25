@@ -3270,6 +3270,7 @@ static struct kmem_cache *bh_cachep __read_mostly;
 static unsigned long max_buffer_heads;
 
 int buffer_heads_over_limit;
+EXPORT_SYMBOL(buffer_heads_over_limit);
 
 struct bh_accounting {
 	int nr;			/* Number of live bh's */

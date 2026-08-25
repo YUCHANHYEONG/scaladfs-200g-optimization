@@ -1030,6 +1030,7 @@ unsigned long sum_zone_node_page_state(int node,
 
 	return count;
 }
+EXPORT_SYMBOL(sum_zone_node_page_state);
 
 /*
  * Determine the per node value of a numa stat item. To avoid deviation,
@@ -1069,6 +1070,7 @@ unsigned long node_page_state(struct pglist_data *pgdat,
 
 	return node_page_state_pages(pgdat, item);
 }
+EXPORT_SYMBOL(node_page_state);
 #endif
 
 #ifdef CONFIG_COMPACTION

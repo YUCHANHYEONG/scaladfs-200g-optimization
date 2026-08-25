@@ -300,6 +300,7 @@ void lru_note_cost(struct lruvec *lruvec, bool file,
 		spin_unlock_irq(&lruvec->lru_lock);
 	} while ((lruvec = parent_lruvec(lruvec)));
 }
+EXPORT_SYMBOL(lru_note_cost);
 
 void lru_note_cost_refault(struct page *page)
 {
@@ -718,6 +719,7 @@ void lru_add_drain(void)
 	lru_add_drain_cpu(smp_processor_id());
 	local_unlock(&lru_pvecs.lock);
 }
+EXPORT_SYMBOL(lru_add_drain);
 
 void lru_add_drain_cpu_zone(struct zone *zone)
 {

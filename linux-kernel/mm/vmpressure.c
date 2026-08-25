@@ -311,6 +311,7 @@ void vmpressure(gfp_t gfp, struct mem_cgroup *memcg, bool tree,
 		}
 	}
 }
+EXPORT_SYMBOL(vmpressure);
 
 /**
  * vmpressure_prio() - Account memory pressure through reclaimer priority level
@@ -341,6 +342,7 @@ void vmpressure_prio(gfp_t gfp, struct mem_cgroup *memcg, int prio)
 	 */
 	vmpressure(gfp, memcg, true, vmpressure_win, 0);
 }
+EXPORT_SYMBOL(vmpressure_prio);
 
 #define MAX_VMPRESSURE_ARGS_LEN	(strlen("critical") + strlen("hierarchy") + 2)
 

@@ -60,6 +60,7 @@ atomic_long_t nr_swap_pages;
 EXPORT_SYMBOL_GPL(nr_swap_pages);
 /* protected with swap_lock. reading in vm_swap_full() doesn't need lock */
 long total_swap_pages;
+EXPORT_SYMBOL(total_swap_pages);
 static int least_priority = -1;
 
 static const char Bad_file[] = "Bad swap file entry ";
@@ -1798,6 +1799,7 @@ int try_to_free_swap(struct page *page)
 	SetPageDirty(page);
 	return 1;
 }
+EXPORT_SYMBOL(try_to_free_swap);
 
 /*
  * Free the swap entry like above, but also try to
