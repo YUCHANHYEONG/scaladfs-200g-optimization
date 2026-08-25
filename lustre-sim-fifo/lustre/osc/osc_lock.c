@@ -281,7 +281,18 @@ static void osc_lock_granted(const struct lu_env *env, struct osc_lock *oscl,
 			ldlm_set_lvb_cached(dlmlock);
 		}
 		LINVRNT(osc_lock_invariant(oscl));
+		/* ych: enable full PW fast path	*/
+		if (dlmlock->l_granted_mode == LCK_PW &&
+				ext->start == 0 &&
+				ext->end == OBD_OBJECT_EOF) {
+			if (osc->oo_full_pw_lock == NULL) {
+				osc->oo_full_pw_lock = LDLM_LOCK_GET(dlmlock);
+				osc->oo_full_pw_granted = true;
+			}
+		}
+		/* ych	*/
 	}
+
 	ktget(&localclock[0]);
 	unlock_res_and_lock(dlmlock);
 	ktget(&localclock[1]);

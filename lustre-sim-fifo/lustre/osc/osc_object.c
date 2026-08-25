@@ -65,6 +65,12 @@ int osc_object_init(const struct lu_env *env, struct lu_object *obj,
         struct osc_object           *osc   = lu2osc(obj);
         const struct cl_object_conf *cconf = lu2cl_conf(conf);
 
+	/* ych	*/
+	osc->oo_full_pw_granted = false;
+	osc->oo_full_pw_lock = NULL;
+	atomic_set(&osc->oo_fast_users, 0);
+	/* ych	*/
+
 	osc->oo_oinfo = cconf->u.coc_oinfo;
 #ifdef CONFIG_LUSTRE_DEBUG_EXPENSIVE_CHECK
 	mutex_init(&osc->oo_debug_mutex);
@@ -115,6 +121,15 @@ void osc_object_free(const struct lu_env *env, struct lu_object *obj)
 	LASSERT(atomic_read(&osc->oo_nr_writes) == 0);
 	LASSERT(list_empty(&osc->oo_ol_list));
 	LASSERT(atomic_read(&osc->oo_nr_ios) == 0);
+
+	/* ych	*/
+	osc->oo_full_pw_granted = false;
+
+	if (osc->oo_full_pw_lock != NULL) {
+		LDLM_LOCK_PUT(osc->oo_full_pw_lock);
+		osc->oo_full_pw_lock = NULL;
+	}
+	/* ych	*/
 
 	lu_object_fini(obj);
 	/* osc doen't contain an lu_object_header, so we don't need call_rcu */

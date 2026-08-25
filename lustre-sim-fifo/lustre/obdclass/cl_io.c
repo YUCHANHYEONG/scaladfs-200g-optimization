@@ -313,6 +313,12 @@ int cl_io_lock(const struct lu_env *env, struct cl_io *io)
 			break;
 	}
 	if (result == 0) {
+		/* ych	*/
+		if (io->ci_fast_pw) {
+			//printk("[%s] FAST PW - bypass cl_lockset_lock\n", __func__);
+			return 0;
+		}
+		/* ych	*/
 		/*
 		 * Sort locks in lexicographical order of their (fid,
 		 * start-offset) pairs to avoid deadlocks.

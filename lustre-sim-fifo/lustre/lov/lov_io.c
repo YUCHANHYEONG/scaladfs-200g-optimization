@@ -38,6 +38,10 @@
 
 #include "lov_cl_internal.h"
 
+/* ych	*/
+#include "lustre_osc.h"
+/* ych	*/
+
 /** \addtogroup lov
  *  @{
  */
@@ -1043,7 +1047,60 @@ static int lov_io_call(const struct lu_env *env, struct lov_io *lio,
 
 static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 {
+	/* ych	*/
+	struct lov_io *lio = cl2lov_io(env, ios);
+	struct cl_io *io = ios->cis_io;
+	struct cl_io_lock_link *link;
+	struct lov_io_sub *sub;
+	bool fast_path = true;
+	bool has_lock = false;
+	/* ych	*/
 	ENTRY;
+
+	/* ych	*/
+	io->ci_fast_pw = 0;
+
+	list_for_each_entry(link, &io->ci_lockset.cls_todo, cill_linkage) {
+		has_lock = true;
+
+		if (link->cill_descr.cld_mode != CLM_WRITE) {
+			fast_path = false;
+			break;
+		}
+	}
+
+	if (!has_lock || !fast_path)
+		goto normal;
+
+	if (list_empty(&lio->lis_active))
+		goto normal;
+
+	list_for_each_entry(sub, &lio->lis_active, sub_linkage) {
+		struct osc_io *oio;
+		struct osc_object *osc;
+
+		oio = osc_env_io(sub->sub_env);
+		osc = cl2osc(oio->oi_cl.cis_obj);
+
+		if (!osc->oo_full_pw_granted) {
+			fast_path = false;
+			break;
+		}
+	}
+
+	if (fast_path) {
+		io->ci_fast_pw = 1;
+
+		list_for_each_entry(sub, &lio->lis_active, sub_linkage)
+			sub->sub_io.ci_fast_pw = 1;
+
+		//printk("[%s] FULL PW FAST PATH\n", __func__);
+
+		RETURN(0);
+	}
+
+normal:
+	/* ych	*/
 	RETURN(lov_io_call(env, cl2lov_io(env, ios), cl_io_lock));
 }
 

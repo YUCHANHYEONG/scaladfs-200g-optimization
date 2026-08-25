@@ -254,8 +254,8 @@ static int lov_lock_enqueue(const struct lu_env *env,
 	int rc = 0;
 
 	ENTRY;
-	printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
-	printk("[%s] lovlck->lls_nr=%d\n", __func__, lovlck->lls_nr);
+//	printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
+//	printk("[%s] lovlck->lls_nr=%d\n", __func__, lovlck->lls_nr);
 
 	for (i = 0; i < lovlck->lls_nr; ++i) {
 		struct lov_lock_sub     *lls = &lovlck->lls_sub[i];

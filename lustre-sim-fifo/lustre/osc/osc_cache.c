@@ -657,6 +657,11 @@ static struct osc_extent *osc_extent_find(const struct lu_env *env,
 	struct client_obd *cli = osc_cli(obj);
 	struct osc_lock   *olck;
 	struct cl_lock_descr *descr;
+	/* ych	*/
+	struct ldlm_lock *dlmlock;
+	struct cl_lock_descr fast_descr;
+	struct osc_io *oio;
+	/* ych	*/
 	struct osc_extent *cur;
 	struct osc_extent *ext;
 	struct osc_extent *conflict = NULL;
@@ -678,13 +683,32 @@ static struct osc_extent *osc_extent_find(const struct lu_env *env,
 	if (cur == NULL)
 		RETURN(ERR_PTR(-ENOMEM));
 
-	olck = osc_env_io(env)->oi_write_osclock;
-	LASSERTF(olck != NULL, "page %lu is not covered by lock\n", index);
-	LASSERT(olck->ols_state == OLS_GRANTED);
+	/* ych	*/
+	oio = osc_env_io(env);
 
-	descr = &olck->ols_cl.cls_lock->cll_descr;
-	LASSERT(descr->cld_mode >= CLM_WRITE);
+	if (oio->oi_cl.cis_io->ci_fast_pw) {
+		dlmlock = obj->oo_full_pw_lock;
 
+		fast_descr.cld_mode = CLM_WRITE;
+		fast_descr.cld_start = dlmlock->l_policy_data.l_extent.start >> PAGE_SHIFT;
+		fast_descr.cld_end = dlmlock->l_policy_data.l_extent.end >> PAGE_SHIFT;
+		fast_descr.cld_gid = dlmlock->l_policy_data.l_extent.gid;
+
+		descr = &fast_descr;
+
+		//printk("[%s] FULL PW FAST PATH\n", __func__);
+	} else {
+		olck = osc_env_io(env)->oi_write_osclock;
+		LASSERTF(olck != NULL, "page %lu is not covered by lock\n", index);
+		LASSERT(olck->ols_state == OLS_GRANTED);
+
+		descr = &olck->ols_cl.cls_lock->cll_descr;
+		LASSERT(descr->cld_mode >= CLM_WRITE);
+
+		dlmlock = olck->ols_dlmlock;
+
+	}
+	/* ych	*/
 	LASSERTF(cli->cl_chunkbits >= PAGE_SHIFT,
 		 "chunkbits: %u\n", cli->cl_chunkbits);
 	ppc_bits   = cli->cl_chunkbits - PAGE_SHIFT;
@@ -712,10 +736,12 @@ static struct osc_extent *osc_extent_find(const struct lu_env *env,
 		cur->oe_end = max_end;
 	cur->oe_grants  = chunksize + cli->cl_grant_extent_tax;
 	cur->oe_mppr    = max_pages;
-	if (olck->ols_dlmlock != NULL) {
-		LASSERT(olck->ols_hold);
+	if (dlmlock != NULL) {
+		if (!oio->oi_cl.cis_io->ci_fast_pw)
+			LASSERT(olck->ols_hold);
+
 		ktget(&localclock[0]);
-		cur->oe_dlmlock = LDLM_LOCK_GET(olck->ols_dlmlock);
+		cur->oe_dlmlock = LDLM_LOCK_GET(dlmlock);
 		ktget(&localclock[1]);
 		ktput(localclock, ldlm_lock_get);
 		lu_ref_add(&olck->ols_dlmlock->l_reference, "osc_extent", cur);
@@ -745,7 +771,7 @@ restart:
 			break;
 
 		/* if covering by different locks, no chance to match */
-		if (olck->ols_dlmlock != ext->oe_dlmlock) {
+		if (dlmlock != ext->oe_dlmlock) {
 			EASSERTF(!overlapped(ext, cur), ext,
 				 EXTSTR"\n", EXTPARA(cur));
 

@@ -1931,7 +1931,11 @@ struct cl_io {
 	 * to userspace, only the RPCs are submitted async, then waited for at
 	 * the llite layer before returning.
 	 */
-			     ci_parallel_dio:1;
+			     ci_parallel_dio:1,
+			     
+			     /* ych: full PW fast path	*/
+			     ci_fast_pw:1;
+	
 	/**
 	 * Bypass quota check
 	 */

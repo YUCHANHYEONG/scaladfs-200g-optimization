@@ -9,11 +9,11 @@ fi
 sudo insmod lustre/obdclass/obdclass.ko
 sudo insmod lustre/ptlrpc/ptlrpc.ko
 sudo insmod lustre/fld/fld.ko
+sudo insmod lustre/osc/osc.ko
 sudo insmod lustre/lov/lov.ko
 sudo insmod lustre/mgc/mgc.ko
 sudo insmod lustre/fid/fid.ko
 sudo insmod lustre/lmv/lmv.ko  
-sudo insmod lustre/osc/osc.ko
 sudo insmod lustre/mdc/mdc.ko
 sudo insmod lustre/llite/lustre.ko
 #mount -t lustre -O nochecksum 192.168.100.101@tcp2:/temp /mnt/client
