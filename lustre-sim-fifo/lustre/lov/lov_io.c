@@ -1059,6 +1059,7 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 
 	/* ych	*/
 	io->ci_fast_pw = 0;
+	io->ci_fast_pw_lock = NULL;
 
 	list_for_each_entry(link, &io->ci_lockset.cls_todo, cill_linkage) {
 		has_lock = true;
@@ -1075,25 +1076,76 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 	if (list_empty(&lio->lis_active))
 		goto normal;
 
+	/*
+	 * First check that every active OSC object has
+	 * a reusable full-range PW lock.
+	 */
 	list_for_each_entry(sub, &lio->lis_active, sub_linkage) {
 		struct osc_io *oio;
 		struct osc_object *osc;
 
+		sub->sub_io.ci_fast_pw = 0;
+		sub->sub_io.ci_fast_pw_lock = NULL;
+
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
-		if (!osc->oo_full_pw_granted) {
+		if (!osc->oo_full_pw_granted ||
+				osc->oo_full_pw_lock == NULL) {
 			fast_path = false;
 			break;
 		}
 	}
 
 	if (fast_path) {
-		io->ci_fast_pw = 1;
+		/*
+		 * Take a real LDLM writer reference for every
+		 * PW lock used by this I/O.
+		 */
+		list_for_each_entry(sub, &lio->lis_active, sub_linkage) {
+			struct osc_io *oio;
+			struct osc_object *osc;
+			struct ldlm_lock *pwlock;
+			struct lustre_handle lockh;
+			int rc;
 
-		list_for_each_entry(sub, &lio->lis_active, sub_linkage)
+			oio = osc_env_io(sub->sub_env);
+			osc = cl2osc(oio->oi_cl.cis_obj);
+
+			pwlock = osc->oo_full_pw_lock;
+			ldlm_lock2handle(pwlock, &lockh);
+
+			rc = ldlm_lock_addref_try(&lockh, LCK_PW);
+			if (rc != 0) {
+				/*
+				 * One lock could not be acquired.
+				 * Drop writer refs already acquired.
+				 */
+				struct lov_io_sub *tmp;
+
+				list_for_each_entry(tmp, &lio->lis_active,
+						sub_linkage) {
+					struct lustre_handle tmph;
+
+					if (tmp->sub_io.ci_fast_pw_lock == NULL)
+						continue;
+
+					ldlm_lock2handle(tmp->sub_io.ci_fast_pw_lock,
+							&tmph);
+
+					ldlm_lock_decref(&tmph, LCK_PW);
+
+					tmp->sub_io.ci_fast_pw_lock = NULL;
+					tmp->sub_io.ci_fast_pw = 0;
+				}
+
+				goto normal;
+			}
+
+			sub->sub_io.ci_fast_pw_lock = pwlock;
 			sub->sub_io.ci_fast_pw = 1;
-
+		}
+		io->ci_fast_pw = 1;
 		//printk("[%s] FULL PW FAST PATH\n", __func__);
 
 		RETURN(0);
@@ -1227,8 +1279,38 @@ static void lov_io_unlock(const struct lu_env *env,
                           const struct cl_io_slice *ios)
 {
 	int rc;
+	/* ych	*/
+	struct lov_io *lio = cl2lov_io(env, ios);
+	struct cl_io *io = ios->cis_io;
+	struct lov_io_sub *sub;
+	/* ych	*/
 
 	ENTRY;
+	
+	/* ych	*/
+	if (io->ci_fast_pw) {
+		list_for_each_entry(sub, &lio->lis_active, sub_linkage) {
+			struct ldlm_lock *pwlock;
+			struct lustre_handle lockh;
+
+			pwlock = sub->sub_io.ci_fast_pw_lock;
+			if (pwlock == NULL)
+				continue;
+
+			ldlm_lock2handle(pwlock, &lockh);
+			ldlm_lock_decref(&lockh, LCK_PW);
+
+			sub->sub_io.ci_fast_pw_lock = NULL;
+			sub->sub_io.ci_fast_pw = 0;
+		}
+
+		io->ci_fast_pw_lock = NULL;
+		io->ci_fast_pw = 0;
+
+		EXIT;
+		return;
+	}
+	/* ych	*/
 	rc = lov_io_call(env, cl2lov_io(env, ios), lov_io_unlock_wrapper);
 	LASSERT(rc == 0);
 	EXIT;
