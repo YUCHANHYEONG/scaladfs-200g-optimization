@@ -70,6 +70,7 @@ int osc_object_init(const struct lu_env *env, struct lu_object *obj,
 	osc->oo_full_pw_lock = NULL;
 	atomic_set(&osc->oo_fast_users, 0);
 	init_waitqueue_head(&osc->oo_fast_waitq);
+	atomic_set(&osc->oo_pw_replacing, 0);
 	/* ych	*/
 
 	osc->oo_oinfo = cconf->u.coc_oinfo;

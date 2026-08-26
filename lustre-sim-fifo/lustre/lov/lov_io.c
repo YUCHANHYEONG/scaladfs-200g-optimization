@@ -1059,6 +1059,7 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 
 	/* ych	*/
 	io->ci_fast_pw = 0;
+	io->ci_fast_pw_lock = NULL;
 
 	list_for_each_entry(link, &io->ci_lockset.cls_todo, cill_linkage) {
 		has_lock = true;
@@ -1082,7 +1083,7 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
-		if (!atomic_read(&osc->oo_full_pw_granted)) {
+		if (atomic_read(&osc->oo_full_pw_granted) != OSC_PW_CACHE_ACTIVE) {
 			fast_path = false;
 			break;
 		}
@@ -1091,6 +1092,10 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 	if (fast_path) {
 		struct osc_io *oio;
 		struct osc_object *osc;
+		struct ldlm_lock *pwlock;
+		struct ldlm_extent *ext;
+		__u64 req_start;
+		__u64 req_end;
 
 		if (!list_is_singular(&lio->lis_active))
 			goto normal;
@@ -1100,19 +1105,45 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
-		if (!atomic_read(&osc->oo_full_pw_granted))
+		if (atomic_read(&osc->oo_full_pw_granted) != OSC_PW_CACHE_ACTIVE)
 			goto normal;
 
 		atomic_inc(&osc->oo_fast_users);
 
 		smp_mb__after_atomic();
 
-		if (!atomic_read(&osc->oo_full_pw_granted)) {
+		if (atomic_read(&osc->oo_full_pw_granted) != OSC_PW_CACHE_ACTIVE) {
 			if (atomic_dec_and_test(&osc->oo_fast_users))
 				wake_up_all(&osc->oo_fast_waitq);
 
 			goto normal;
 		}
+
+		/* From here, Blocking AST cannot release the cached lock
+		 * until oo_fast_users drops to zero
+		 */
+		pwlock = osc->oo_full_pw_lock;
+		if (pwlock == NULL) {
+			if (atomic_dec_and_test(&osc->oo_fast_users))
+				wake_up_all(&osc->oo_fast_waitq);
+
+			goto normal;
+		}
+
+		req_start = sub->sub_io.u.ci_rw.crw_pos;
+		req_end = req_start + sub->sub_io.u.ci_rw.crw_count - 1;
+
+		ext = &pwlock->l_policy_data.l_extent;
+
+		if (ext->start > req_start || ext->end < req_end) {
+			if (atomic_dec_and_test(&osc->oo_fast_users))
+				wake_up_all(&osc->oo_fast_waitq);
+
+			goto normal;
+		}
+
+		io->ci_fast_pw_lock = LDLM_LOCK_GET(pwlock);
+		sub->sub_io.ci_fast_pw_lock = io->ci_fast_pw_lock;
 
 		io->ci_fast_pw = 1;
 		sub->sub_io.ci_fast_pw = 1;
@@ -1260,6 +1291,7 @@ static void lov_io_unlock(const struct lu_env *env,
 	if (io->ci_fast_pw) {
 		struct osc_io *oio;
 		struct osc_object *osc;
+		struct ldlm_lock *dlmlock;
 
 		LASSERT(list_is_singular(&lio->lis_active));
 
@@ -1268,8 +1300,15 @@ static void lov_io_unlock(const struct lu_env *env,
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
+		dlmlock = io->ci_fast_pw_lock;
+
 		io->ci_fast_pw = 0;
 		sub->sub_io.ci_fast_pw = 0;
+
+		io->ci_fast_pw_lock = NULL;
+		sub->sub_io.ci_fast_pw_lock = NULL;
+
+		LDLM_LOCK_PUT(dlmlock);
 
 		if (atomic_dec_and_test(&osc->oo_fast_users))
 			wake_up_all(&osc->oo_fast_waitq);

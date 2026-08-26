@@ -1970,6 +1970,8 @@ struct cl_io {
 	 * Range of write intent. Valid if ci_need_write_intent is set.
 	 */
 	struct lu_extent	ci_write_intent;
+	/* ych	*/
+	struct ldlm_lock	*ci_fast_pw_lock;
 };
 
 /** @} cl_io */

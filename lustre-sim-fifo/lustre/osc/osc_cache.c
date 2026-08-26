@@ -687,7 +687,9 @@ static struct osc_extent *osc_extent_find(const struct lu_env *env,
 	oio = osc_env_io(env);
 
 	if (oio->oi_cl.cis_io->ci_fast_pw) {
-		dlmlock = obj->oo_full_pw_lock;
+		dlmlock = oio->oi_cl.cis_io->ci_fast_pw_lock;
+
+		LASSERT(dlmlock != NULL);
 
 		fast_descr.cld_mode = CLM_WRITE;
 		fast_descr.cld_start = dlmlock->l_policy_data.l_extent.start >> PAGE_SHIFT;
@@ -744,7 +746,8 @@ static struct osc_extent *osc_extent_find(const struct lu_env *env,
 		cur->oe_dlmlock = LDLM_LOCK_GET(dlmlock);
 		ktget(&localclock[1]);
 		ktput(localclock, ldlm_lock_get);
-		lu_ref_add(&olck->ols_dlmlock->l_reference, "osc_extent", cur);
+		lu_ref_add(&dlmlock->l_reference, "osc_extent", cur);
+		//lu_ref_add(&olck->ols_dlmlock->l_reference, "osc_extent", cur);
 	}
 
 	/* grants has been allocated by caller */

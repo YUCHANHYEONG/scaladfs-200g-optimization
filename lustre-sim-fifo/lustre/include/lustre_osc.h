@@ -255,6 +255,15 @@ struct osc_object_operations {
 						enum osc_dap_flags dap_flags);
 };
 
+/* ych	*/
+enum osc_pw_cache_state {
+	OSC_PW_CACHE_DISABLED = 0,
+	OSC_PW_CACHE_ACTIVE,
+	OSC_PW_CACHE_REPLACING,
+	OSC_PW_CACHE_BLOCKING,
+};
+/* ych	*/
+
 struct osc_object {
 	struct cl_object	oo_cl;
 	struct lov_oinfo	*oo_oinfo;
@@ -323,6 +332,7 @@ struct osc_object {
 	struct ldlm_lock	*oo_full_pw_lock;
 	atomic_t		oo_fast_users;
 	wait_queue_head_t	oo_fast_waitq;
+	atomic_t		oo_pw_replacing;
 	/* ych	*/
 };
 
