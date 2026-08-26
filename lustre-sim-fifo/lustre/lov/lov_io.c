@@ -1096,6 +1096,8 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 		struct ldlm_extent *ext;
 		__u64 req_start;
 		__u64 req_end;
+		struct lustre_handle lockh;
+		int rc;
 
 		if (!list_is_singular(&lio->lis_active))
 			goto normal;
@@ -1136,6 +1138,20 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 		ext = &pwlock->l_policy_data.l_extent;
 
 		if (ext->start > req_start || ext->end < req_end) {
+			if (atomic_dec_and_test(&osc->oo_fast_users))
+				wake_up_all(&osc->oo_fast_waitq);
+
+			goto normal;
+		}
+
+		/*
+		 * Keep the cached PW lock marked as actively used by a writer.
+		 * If cancellation has already started, give up the fast path.
+		 */
+		ldlm_lock2handle(pwlock, &lockh);
+
+		rc = ldlm_lock_addref_try(&lockh, LCK_PW);
+		if (rc != 0) {
 			if (atomic_dec_and_test(&osc->oo_fast_users))
 				wake_up_all(&osc->oo_fast_waitq);
 
@@ -1292,6 +1308,7 @@ static void lov_io_unlock(const struct lu_env *env,
 		struct osc_io *oio;
 		struct osc_object *osc;
 		struct ldlm_lock *dlmlock;
+		struct lustre_handle lockh;
 
 		LASSERT(list_is_singular(&lio->lis_active));
 
@@ -1302,11 +1319,22 @@ static void lov_io_unlock(const struct lu_env *env,
 
 		dlmlock = io->ci_fast_pw_lock;
 
+		/*
+		 * Drop the writer usage reference acquired by
+		 * ldlm_lock_addref_try().
+		 */
+		ldlm_lock2handle(dlmlock, &lockh);
+		ldlm_lock_decref(&lockh, LCK_PW);
+
 		io->ci_fast_pw = 0;
 		sub->sub_io.ci_fast_pw = 0;
 
 		io->ci_fast_pw_lock = NULL;
 		sub->sub_io.ci_fast_pw_lock = NULL;
+
+		/*
+		 * Drop the per-I/O lifetime reference.
+		 */
 
 		LDLM_LOCK_PUT(dlmlock);
 
