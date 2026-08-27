@@ -745,6 +745,9 @@ void ldlm_lock_addref(const struct lustre_handle *lockh, enum ldlm_mode mode)
 }
 EXPORT_SYMBOL(ldlm_lock_addref);
 
+
+KTDEF(ldlm_lock_remove_from_lru);
+EXPORT_SYMBOL(ldlm_lock_remove_from_lru_clock);
 /**
  * Helper function.
  * Add specified reader/writer reference to LDLM lock \a lock.
@@ -752,6 +755,17 @@ EXPORT_SYMBOL(ldlm_lock_addref);
  * Removes lock from LRU if it is there.
  * Assumes the LDLM lock is already locked.
  */
+void fast_ldlm_lock_addref_internal_nolock(struct ldlm_lock *lock)
+{
+	ktime_t localclock[2];
+
+	ktget(&localclock[0]);
+        ldlm_lock_remove_from_lru(lock);
+	ktget(&localclock[1]);
+	ktput(localclock, ldlm_lock_remove_from_lru);
+	lock->l_writers++;
+}
+
 void ldlm_lock_addref_internal_nolock(struct ldlm_lock *lock,
 				      enum ldlm_mode mode)
 {
@@ -769,6 +783,43 @@ void ldlm_lock_addref_internal_nolock(struct ldlm_lock *lock,
         LDLM_DEBUG(lock, "ldlm_lock_addref(%s)", ldlm_lockname[mode]);
 }
 
+KTDEF(addref_lock_res_and_lock);
+EXPORT_SYMBOL(addref_lock_res_and_lock_clock);
+KTDEF(ldlm_lock_addref_internal_nolock);
+EXPORT_SYMBOL(ldlm_lock_addref_internal_nolock_clock);
+KTDEF(fast_lock_res_and_lock);
+EXPORT_SYMBOL(fast_lock_res_and_lock_clock);
+KTDEF(fast_ldlm_lock_addref_internal_nolock);
+EXPORT_SYMBOL(fast_ldlm_lock_addref_internal_nolock_clock);
+
+/* ych	*/
+int fast_ldlm_lock_addref_try(struct ldlm_lock *lock)
+{
+        int               result;
+	ktime_t localclock[2];
+
+        result = -EAGAIN;
+        if (lock != NULL) {
+		ktget(&localclock[0]);
+                lock_res_and_lock(lock);
+		ktget(&localclock[1]);
+		ktput(localclock, fast_lock_res_and_lock);
+                if (!ldlm_is_cbpending(lock)) {
+			ktget(&localclock[0]);
+                        fast_ldlm_lock_addref_internal_nolock(lock);
+			ktget(&localclock[1]);
+			ktput(localclock, fast_ldlm_lock_addref_internal_nolock);
+                        // ldlm_lock_addref_internal_nolock(lock, mode);
+                        result = 0;
+                }
+                unlock_res_and_lock(lock);
+        }
+        return result;
+}
+EXPORT_SYMBOL(fast_ldlm_lock_addref_try);
+/* ych	*/
+
+
 /**
  * Attempts to add reader/writer reference to a lock with handle \a lockh, and
  * fails if lock is already LDLM_FL_CBPENDING or destroyed.
@@ -781,14 +832,21 @@ int ldlm_lock_addref_try(const struct lustre_handle *lockh, enum ldlm_mode mode)
 {
         struct ldlm_lock *lock;
         int               result;
+	ktime_t	localclock[2];
 
         result = -EAGAIN;
         lock = ldlm_handle2lock(lockh);
         if (lock != NULL) {
+		ktget(&localclock[0]);
                 lock_res_and_lock(lock);
+		ktget(&localclock[1]);
+		ktput(localclock, addref_lock_res_and_lock);
                 if (lock->l_readers != 0 || lock->l_writers != 0 ||
 		    !ldlm_is_cbpending(lock)) {
+			ktget(&localclock[0]);
                         ldlm_lock_addref_internal_nolock(lock, mode);
+			ktget(&localclock[1]);
+			ktput(localclock, ldlm_lock_addref_internal_nolock);
                         result = 0;
                 }
                 unlock_res_and_lock(lock);
@@ -808,6 +866,11 @@ void ldlm_lock_addref_internal(struct ldlm_lock *lock, enum ldlm_mode mode)
 	lock_res_and_lock(lock);
 	ldlm_lock_addref_internal_nolock(lock, mode);
 	unlock_res_and_lock(lock);
+}
+
+void fast_ldlm_lock_decref_internal_nolock(struct ldlm_lock *lock)
+{
+	lock->l_writers--;
 }
 
 /**
@@ -929,6 +992,52 @@ void lustre_ldlm_lock_decref_internal(struct ldlm_lock *lock, enum ldlm_mode mod
 	EXIT;
 }
 
+void fast_ldlm_lock_decref_internal(struct ldlm_lock *lock)
+{
+	struct ldlm_namespace *ns;
+
+	ENTRY;
+
+	lock_res_and_lock(lock);
+
+	ns = ldlm_lock_to_ns(lock);
+
+	fast_ldlm_lock_decref_internal_nolock(lock);
+	//ldlm_lock_decref_internal_nolock(lock, mode);
+
+	if (!lock->l_readers && !lock->l_writers && ldlm_is_cbpending(lock)) {
+
+		LDLM_LOCK_GET(lock); /* dropped by bl thread */
+		ldlm_lock_remove_from_lru(lock);
+		unlock_res_and_lock(lock);
+
+		if (ldlm_is_atomic_cb(lock) ||
+                    ldlm_bl_to_thread_lock(ns, NULL, lock) != 0)
+			ldlm_handle_bl_callback(ns, NULL, lock);
+		EXIT;
+		return;
+        } else if (ns_is_client(ns) &&
+		   !lock->l_readers && !lock->l_writers &&
+		   !ldlm_is_no_lru(lock) &&
+		   !ldlm_is_bl_ast(lock) &&
+		   !ldlm_is_converting(lock)) {
+
+		/* If this is a client-side namespace and this was the last
+		 * reference, put it on the LRU.
+		 */
+		ldlm_lock_add_to_lru(lock);
+		unlock_res_and_lock(lock);
+
+		ldlm_pool_recalc(&ns->ns_pool, true);
+	} else {
+		LDLM_DEBUG(lock, "do not add lock into lru list");
+		unlock_res_and_lock(lock);
+	}
+
+	EXIT;
+}
+EXPORT_SYMBOL(fast_ldlm_lock_decref_internal);
+
 void ldlm_lock_decref_internal(struct ldlm_lock *lock, enum ldlm_mode mode)
 {
 	struct ldlm_namespace *ns;
@@ -1013,6 +1122,13 @@ void lustre_ldlm_lock_decref(const struct lustre_handle *lockh, enum ldlm_mode m
         LDLM_LOCK_PUT(lock);
 }
 EXPORT_SYMBOL(lustre_ldlm_lock_decref);
+
+void fast_ldlm_lock_decref(struct ldlm_lock *lock)
+{
+        fast_ldlm_lock_decref_internal(lock);
+        //ldlm_lock_decref_internal(lock, mode);
+}
+EXPORT_SYMBOL(fast_ldlm_lock_decref);
 
 void ldlm_lock_decref(const struct lustre_handle *lockh, enum ldlm_mode mode)
 {

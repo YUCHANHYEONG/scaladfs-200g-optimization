@@ -1049,8 +1049,8 @@ KTDEF(lov_cls_todo_scan);
 EXPORT_SYMBOL(lov_cls_todo_scan_clock);
 KTDEF(lov_lis_active_scan);
 EXPORT_SYMBOL(lov_lis_active_scan_clock);
-KTDEF(ldlm_lock_addref_try);
-EXPORT_SYMBOL(ldlm_lock_addref_try_clock);
+KTDEF(fast_ldlm_lock_addref_try);
+EXPORT_SYMBOL(fast_ldlm_lock_addref_try_clock);
 KTDEF(lov_io_call);
 EXPORT_SYMBOL(lov_io_call_clock);
 
@@ -1113,7 +1113,6 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 		struct ldlm_extent *ext;
 		__u64 req_start;
 		__u64 req_end;
-		struct lustre_handle lockh;
 		int rc;
 
 		if (!list_is_singular(&lio->lis_active))
@@ -1165,12 +1164,13 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 		 * Keep the cached PW lock marked as actively used by a writer.
 		 * If cancellation has already started, give up the fast path.
 		 */
-		ldlm_lock2handle(pwlock, &lockh);
+		//ldlm_lock2handle(pwlock, &lockh);
 
 		ktget(&localclock[0]);
-		rc = ldlm_lock_addref_try(&lockh, LCK_PW);
+		rc = fast_ldlm_lock_addref_try(pwlock);
+		//rc = ldlm_lock_addref_try(&lockh, LCK_PW);
 		ktget(&localclock[1]);
-		ktput(localclock, ldlm_lock_addref_try);
+		ktput(localclock, fast_ldlm_lock_addref_try);
 		if (rc != 0) {
 			if (atomic_dec_and_test(&osc->oo_fast_users))
 				wake_up_all(&osc->oo_fast_waitq);
@@ -1349,7 +1349,6 @@ static void lov_io_unlock(const struct lu_env *env,
 		struct osc_io *oio;
 		struct osc_object *osc;
 		struct ldlm_lock *dlmlock;
-		struct lustre_handle lockh;
 
 		LASSERT(list_is_singular(&lio->lis_active));
 
@@ -1364,8 +1363,8 @@ static void lov_io_unlock(const struct lu_env *env,
 		 * Drop the writer usage reference acquired by
 		 * ldlm_lock_addref_try().
 		 */
-		ldlm_lock2handle(dlmlock, &lockh);
-		ldlm_lock_decref(&lockh, LCK_PW);
+		fast_ldlm_lock_decref(dlmlock);
+		//ldlm_lock_decref(&lockh, LCK_PW);
 
 		io->ci_fast_pw = 0;
 		sub->sub_io.ci_fast_pw = 0;

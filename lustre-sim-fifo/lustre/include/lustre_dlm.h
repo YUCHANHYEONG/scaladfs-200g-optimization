@@ -1886,4 +1886,8 @@ static inline int ldlm_extent_contain(const struct ldlm_extent *ex1,
 int ldlm_inodebits_drop(struct ldlm_lock *lock,  __u64 to_drop);
 
 #endif
+/* ych	*/
+int fast_ldlm_lock_addref_try(struct ldlm_lock *lock);
+void fast_ldlm_lock_decref(struct ldlm_lock *lock);
+/* ych	*/
 /** @} LDLM */
