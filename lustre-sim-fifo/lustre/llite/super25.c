@@ -359,6 +359,7 @@ KTDEC(cl_io_loop);
 KTDEC(ll_file_io_generic);
 KTDEC(cl_io_loop_internal);
 KTDEC(cl_io_lock);
+KTDEC(lov_io_lock);
 KTDEC(cl_io_iter_init);
 KTDEC(cl_io_start);
 KTDEC(cl_io_end);
@@ -378,6 +379,10 @@ KTDEC(generic_write_sync);
 KTDEC(vvp_io_write_commit);
 
 KTDEC(vvp_io_write_lock);
+KTDEC(vvp_mmap_locks);
+KTDEC(mmap_read_lock);
+KTDEC(our_vma);
+KTDEC(vvp_io_one_lock);
 KTDEC(vvp_io_read_lock);
 KTDEC(cl_lockset_lock);
 
@@ -765,6 +770,12 @@ static void __exit lustre_exit(void)
 
 	//ktprint(3, cl_io_loop_internal);
 	ktprint(4, cl_io_lock);
+	ktprint(5, vvp_io_write_lock);
+	ktprint(6, vvp_mmap_locks);
+	ktprint(7, mmap_read_lock);
+	ktprint(7, our_vma);
+	ktprint(6, vvp_io_one_lock);
+	ktprint(5, lov_io_lock);
 	ktprint(5, cl_lockset_lock);
 	ktprint(6, cl_lock_init);
 	ktprint(6, cl_lock_enqueue);
@@ -809,7 +820,6 @@ static void __exit lustre_exit(void)
 	ktprint(10, lock_res_and_lock);
 	ktprint(9, osc_set_lock_data_wrap);
 	ktprint(7, mdc_lock_enqueue);
-	// ktprint(5, vvp_io_write_lock);
 	// ktprint(5, vvp_io_read_lock);
 
 	ktprint(4, cl_io_iter_init);

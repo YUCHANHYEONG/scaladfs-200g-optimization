@@ -434,6 +434,11 @@ static enum cl_lock_mode vvp_mode_from_vma(struct vm_area_struct *vma)
         return CLM_READ;
 }
 
+KTDEF(mmap_read_lock);
+EXPORT_SYMBOL(mmap_read_lock_clock);
+KTDEF(our_vma);
+EXPORT_SYMBOL(our_vma_clock);
+
 static int vvp_mmap_locks(const struct lu_env *env,
 			  struct vvp_io *vio, struct cl_io *io)
 {
@@ -447,6 +452,7 @@ static int vvp_mmap_locks(const struct lu_env *env,
 	unsigned long addr;
 	ssize_t count;
 	int result = 0;
+	ktime_t localclock[2];
 	ENTRY;
 
 	LASSERT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
@@ -475,11 +481,24 @@ static int vvp_mmap_locks(const struct lu_env *env,
 		count += addr & ~PAGE_MASK;
 		addr &= PAGE_MASK;
 
+		ktget(&localclock[0]);
 		mmap_read_lock(mm);
-		while ((vma = our_vma(mm, addr, count)) != NULL) {
-			struct dentry *de = file_dentry(vma->vm_file);
-			struct inode *inode = de->d_inode;
+		ktget(&localclock[1]);
+		ktput(localclock, mmap_read_lock);
+		while (1) {
+			struct dentry *de;
+			struct inode *inode;
 			int flags = CEF_MUST;
+
+			ktget(&localclock[0]);
+			vma = our_vma(mm, addr, count);
+			ktget(&localclock[1]);
+			ktput(localclock, our_vma);
+			if (vma == NULL)
+				break;
+
+			de = file_dentry(vma->vm_file);
+			inode = de->d_inode;
 
 			if (ll_file_nolock(vma->vm_file)) {
 				/*
@@ -515,6 +534,45 @@ static int vvp_mmap_locks(const struct lu_env *env,
 			count -= vma->vm_end - addr;
 			addr = vma->vm_end;
 		}
+		//while ((vma = our_vma(mm, addr, count)) != NULL) {
+		//	struct dentry *de = file_dentry(vma->vm_file);
+		//	struct inode *inode = de->d_inode;
+		//	int flags = CEF_MUST;
+
+		//	if (ll_file_nolock(vma->vm_file)) {
+		//		/*
+		//		 * For no lock case is not allowed for mmap
+		//		 */
+		//		result = -EINVAL;
+		//		break;
+		//	}
+
+		//	/*
+		//	 * XXX: Required lock mode can be weakened: CIT_WRITE
+		//	 * io only ever reads user level buffer, and CIT_READ
+		//	 * only writes on it.
+		//	 */
+		//	policy_from_vma(&policy, vma, addr, count);
+		//	descr->cld_mode = vvp_mode_from_vma(vma);
+		//	descr->cld_obj = ll_i2info(inode)->lli_clob;
+		//	descr->cld_start = policy.l_extent.start >> PAGE_SHIFT;
+		//	descr->cld_end = policy.l_extent.end >> PAGE_SHIFT;
+		//	descr->cld_enq_flags = flags;
+		//	result = cl_io_lock_alloc_add(env, io, descr);
+
+		//	CDEBUG(D_VFSTRACE, "lock: %d: [%lu, %lu]\n",
+		//	       descr->cld_mode, descr->cld_start,
+		//	       descr->cld_end);
+
+		//	if (result < 0)
+		//		break;
+
+		//	if (vma->vm_end - addr >= count)
+		//		break;
+
+		//	count -= vma->vm_end - addr;
+		//	addr = vma->vm_end;
+		//}
 		mmap_read_unlock(mm);
 		if (result < 0)
 			break;
@@ -553,12 +611,18 @@ static void vvp_io_update_iov(const struct lu_env *env,
 	iov_iter_truncate(vio->vui_iter, size);
 }
 
+KTDEF(vvp_mmap_locks);
+EXPORT_SYMBOL(vvp_mmap_locks_clock);
+KTDEF(vvp_io_one_lock);
+EXPORT_SYMBOL(vvp_io_one_lock_clock);
+
 static int vvp_io_rw_lock(const struct lu_env *env, struct cl_io *io,
                           enum cl_lock_mode mode, loff_t start, loff_t end)
 {
 	struct vvp_io *vio = vvp_env_io(env);
 	int result;
 	int ast_flags = 0;
+	ktime_t localclock[2];
 	//printk("[%s] start!\n", __func__);
 
 	LASSERT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
@@ -581,9 +645,16 @@ static int vvp_io_rw_lock(const struct lu_env *env, struct cl_io *io,
 			ast_flags |= CEF_NEVER;
 	}
 
+	ktget(&localclock[0]);
 	result = vvp_mmap_locks(env, vio, io);
-	if (result == 0)
+	ktget(&localclock[1]);
+	ktput(localclock, vvp_mmap_locks);
+	if (result == 0){
+		ktget(&localclock[0]);
 		result = vvp_io_one_lock(env, io, ast_flags, mode, start, end);
+		ktget(&localclock[1]);
+		ktput(localclock, vvp_io_one_lock);
+	}
 
 	RETURN(result);
 }

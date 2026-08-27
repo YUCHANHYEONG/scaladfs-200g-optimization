@@ -1045,7 +1045,7 @@ static int lov_io_call(const struct lu_env *env, struct lov_io *lio,
 	RETURN(rc);
 }
 
-static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
+static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_slice *ios)
 {
 	/* ych	*/
 	struct lov_io *lio = cl2lov_io(env, ios);
@@ -1170,6 +1170,22 @@ static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
 normal:
 	/* ych	*/
 	RETURN(lov_io_call(env, cl2lov_io(env, ios), cl_io_lock));
+}
+
+KTDEF(lov_io_lock);
+EXPORT_SYMBOL(lov_io_lock_clock);
+
+static int lov_io_lock(const struct lu_env *env, const struct cl_io_slice *ios)
+{
+	ktime_t localclock[2];
+	int rc;
+
+	ktget(&localclock[0]);
+	rc = lov_io_lock_internal(env, ios);
+	ktget(&localclock[1]);
+	ktput(localclock, lov_io_lock);
+
+	return rc;
 }
 
 KTDEF(lov_io_start);
