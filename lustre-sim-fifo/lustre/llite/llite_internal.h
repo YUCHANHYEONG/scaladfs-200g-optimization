@@ -1920,6 +1920,7 @@ int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 /* ych	*/
 unsigned long lustre_try_to_free_pages(struct zonelist *zonelist, int order,
 		gfp_t gfp_mask, nodemask_t *nodemask);
+extern atomic_t ll_shared_mmap_count;
 /* ych	*/
 
 #endif /* LLITE_INTERNAL_H */

@@ -40,6 +40,10 @@
 #include "llite_internal.h"
 #include <lustre_compat.h>
 
+/* ych	*/
+atomic_t ll_shared_mmap_count = ATOMIC_INIT(0);
+/* ych	*/
+
 static const struct vm_operations_struct ll_file_vm_ops;
 
 void policy_from_vma(union ldlm_policy_data *policy, struct vm_area_struct *vma,
@@ -564,6 +568,11 @@ static void ll_vm_open(struct vm_area_struct * vma)
 
 	ENTRY;
 	LASSERT(atomic_read(&vob->vob_mmap_cnt) >= 0);
+
+	/* ych: Track Lustre shared mmap globally	*/
+	if (vma->vm_flags & VM_SHARED)
+		atomic_inc(&ll_shared_mmap_count);
+	/* ych	*/
 	atomic_inc(&vob->vob_mmap_cnt);
 	pcc_vm_open(vma);
 	EXIT;
@@ -578,6 +587,10 @@ static void ll_vm_close(struct vm_area_struct *vma)
 	struct vvp_object *vob   = cl_inode2vvp(inode);
 
 	ENTRY;
+	/* ych: Track Lustre shared mmap globally	*/
+	if (vma->vm_flags & VM_SHARED)
+		atomic_dec(&ll_shared_mmap_count);
+	/* ych	*/
 	atomic_dec(&vob->vob_mmap_cnt);
 	LASSERT(atomic_read(&vob->vob_mmap_cnt) >= 0);
 	pcc_vm_close(vma);

@@ -1045,6 +1045,15 @@ static int lov_io_call(const struct lu_env *env, struct lov_io *lio,
 	RETURN(rc);
 }
 
+KTDEF(lov_cls_todo_scan);
+EXPORT_SYMBOL(lov_cls_todo_scan_clock);
+KTDEF(lov_lis_active_scan);
+EXPORT_SYMBOL(lov_lis_active_scan_clock);
+KTDEF(ldlm_lock_addref_try);
+EXPORT_SYMBOL(ldlm_lock_addref_try_clock);
+KTDEF(lov_io_call);
+EXPORT_SYMBOL(lov_io_call_clock);
+
 static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_slice *ios)
 {
 	/* ych	*/
@@ -1054,6 +1063,8 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 	struct lov_io_sub *sub;
 	bool fast_path = true;
 	bool has_lock = false;
+	int rc;
+	ktime_t localclock[2];
 	/* ych	*/
 	ENTRY;
 
@@ -1061,6 +1072,7 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 	io->ci_fast_pw = 0;
 	io->ci_fast_pw_lock = NULL;
 
+	ktget(&localclock[0]);
 	list_for_each_entry(link, &io->ci_lockset.cls_todo, cill_linkage) {
 		has_lock = true;
 
@@ -1069,6 +1081,8 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 			break;
 		}
 	}
+	ktget(&localclock[1]);
+	ktput(localclock, lov_cls_todo_scan);
 
 	if (!has_lock || !fast_path)
 		goto normal;
@@ -1076,6 +1090,7 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 	if (list_empty(&lio->lis_active))
 		goto normal;
 
+	ktget(&localclock[0]);
 	list_for_each_entry(sub, &lio->lis_active, sub_linkage) {
 		struct osc_io *oio;
 		struct osc_object *osc;
@@ -1088,6 +1103,8 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 			break;
 		}
 	}
+	ktget(&localclock[1]);
+	ktput(localclock, lov_lis_active_scan);
 
 	if (fast_path) {
 		struct osc_io *oio;
@@ -1150,7 +1167,10 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 		 */
 		ldlm_lock2handle(pwlock, &lockh);
 
+		ktget(&localclock[0]);
 		rc = ldlm_lock_addref_try(&lockh, LCK_PW);
+		ktget(&localclock[1]);
+		ktput(localclock, ldlm_lock_addref_try);
 		if (rc != 0) {
 			if (atomic_dec_and_test(&osc->oo_fast_users))
 				wake_up_all(&osc->oo_fast_waitq);
@@ -1169,7 +1189,12 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 
 normal:
 	/* ych	*/
-	RETURN(lov_io_call(env, cl2lov_io(env, ios), cl_io_lock));
+	ktget(&localclock[0]);
+	rc = lov_io_call(env, cl2lov_io(env, ios), cl_io_lock);
+	ktget(&localclock[1]);
+	ktput(localclock, lov_io_call);
+	RETURN(rc);
+	//RETURN(lov_io_call(env, cl2lov_io(env, ios), cl_io_lock));
 }
 
 KTDEF(lov_io_lock);

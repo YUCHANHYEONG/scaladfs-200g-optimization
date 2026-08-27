@@ -438,7 +438,6 @@ KTDEF(mmap_read_lock);
 EXPORT_SYMBOL(mmap_read_lock_clock);
 KTDEF(our_vma);
 EXPORT_SYMBOL(our_vma_clock);
-
 static int vvp_mmap_locks(const struct lu_env *env,
 			  struct vvp_io *vio, struct cl_io *io)
 {
@@ -624,7 +623,7 @@ static int vvp_io_rw_lock(const struct lu_env *env, struct cl_io *io,
 	int ast_flags = 0;
 	ktime_t localclock[2];
 	//printk("[%s] start!\n", __func__);
-
+	
 	LASSERT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
 	ENTRY;
 
@@ -645,10 +644,16 @@ static int vvp_io_rw_lock(const struct lu_env *env, struct cl_io *io,
 			ast_flags |= CEF_NEVER;
 	}
 
-	ktget(&localclock[0]);
-	result = vvp_mmap_locks(env, vio, io);
-	ktget(&localclock[1]);
-	ktput(localclock, vvp_mmap_locks);
+	/* ych: Skip mmap lock scan when no Lustre shared map exists	*/
+	if (likely(atomic_read(&ll_shared_mmap_count) == 0)) {
+		result = 0;
+	} else {
+		ktget(&localclock[0]);
+		result = vvp_mmap_locks(env, vio, io);
+		ktget(&localclock[1]);
+		ktput(localclock, vvp_mmap_locks);
+	}
+	/* ych	*/
 	if (result == 0){
 		ktget(&localclock[0]);
 		result = vvp_io_one_lock(env, io, ast_flags, mode, start, end);
