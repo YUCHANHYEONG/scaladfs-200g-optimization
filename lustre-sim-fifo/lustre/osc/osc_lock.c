@@ -617,6 +617,82 @@ static int osc_dlm_blocking_ast0(const struct lu_env *env,
 	RETURN(result);
 }
 
+/* ych	*/
+static void osc_pw_cache_clear(struct osc_object *osc)
+{
+	int state;
+	printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
+
+	if (osc == NULL)
+		return;
+
+retry:
+	state = atomic_read(&osc->oo_full_pw_granted);
+
+	/*
+	 * Another Blocking AST is already handling the cache.
+	 * Wait for it and check the state again.
+	 */
+	if (state == OSC_PW_CACHE_BLOCKING) {
+		wait_event(osc->oo_fast_waitq,
+				atomic_read(&osc->oo_full_pw_granted) !=
+				OSC_PW_CACHE_BLOCKING);
+		goto retry;
+	}
+
+	/*
+	 * No cached PW lock and no pointer operation in progress.
+	 */
+	if (state == OSC_PW_CACHE_DISABLED &&
+			atomic_read(&osc->oo_pw_replacing) == 0)
+		return;
+
+	/*
+	 * Stop cache registration/replacement and new fast-path I/O.
+	 */
+	if (atomic_cmpxchg(&osc->oo_full_pw_granted, state, 
+				OSC_PW_CACHE_BLOCKING) != state)
+		goto retry;
+
+	/* 
+	 * Wait until the current registration/replacement
+	 * finishes its pointer operation.
+	 *
+	 * Then acquire pointer ownership.
+	 */
+	for (;;) {
+		wait_event(osc->oo_fast_waitq,
+				atomic_read(&osc->oo_pw_replacing) == 0);
+
+		if (atomic_cmpxchg(&osc->oo_pw_replacing, 0, 1) == 0)
+			break;
+	}
+
+	/*
+	 * No new fast-path users can enter while state is BLOCKING.
+	 * Wait for existing users to finish.
+	 */
+	wait_event(osc->oo_fast_waitq, atomic_read(&osc->oo_fast_users) == 0);
+
+	/*
+	 * Final cache cleanup.
+	 */
+	if (osc->oo_full_pw_lock != NULL) {
+		struct ldlm_lock *old;
+
+		old = osc->oo_full_pw_lock;
+		osc->oo_full_pw_lock = NULL;
+		LDLM_LOCK_PUT(old);
+	}
+
+	atomic_set(&osc->oo_full_pw_granted,
+			OSC_PW_CACHE_DISABLED);
+
+	atomic_set(&osc->oo_pw_replacing, 0);
+	wake_up_all(&osc->oo_fast_waitq);
+}
+/* ych	*/
+
 /**
  * Blocking ast invoked by ldlm when dlm lock is either blocking progress of
  * some other lock, or is canceled. This function is installed as a
@@ -672,79 +748,8 @@ static int osc_ldlm_blocking_ast(struct ldlm_lock *dlmlock,
 		/* ych */
 		struct osc_object *osc = data;
 
-		if (osc != NULL) {
-			int state;
-retry:
-			state = atomic_read(&osc->oo_full_pw_granted);
-			/*
-			 * Another Blocking AST is already handling the cache.
-			 * Wait for it and check the state again.
-			 */
-			if (state == OSC_PW_CACHE_BLOCKING) {
-				wait_event(osc->oo_fast_waitq,
-					atomic_read(&osc->oo_full_pw_granted) !=
-						OSC_PW_CACHE_BLOCKING);
-				goto retry;
-			}
-
-			/*
-			 * No cached PW lock and no pointer operation in progress.
-			 */
-			if (state == OSC_PW_CACHE_DISABLED &&
-				atomic_read(&osc->oo_pw_replacing) == 0)
-				goto cache_done;
-
-			/*
-			 * Blocking AST always wins.
-			 * Stop cache registration/replacement and new fast-path I/O.
-			 */
-			if (atomic_cmpxchg(&osc->oo_full_pw_granted,
-					state,
-					OSC_PW_CACHE_BLOCKING) != state)
-				goto retry;
-
-			/*
-			 * Wait until the current registration/replacement
-			 * finishes its pointer operation.
-			 *
-			 * Then acquire pointer ownership for this BL thread.
-			 */
-			for (;;) {
-				wait_event(osc->oo_fast_waitq,
-					atomic_read(&osc->oo_pw_replacing) == 0);
-
-				if (atomic_cmpxchg(&osc->oo_pw_replacing,
-							0, 1) == 0)
-					break;
-			}
-
-			/*
-			 * No new fast-path users can enter while state is BLOCKING.
-			 * Wait for existing users to finish.
-			 */
-			wait_event(osc->oo_fast_waitq,
-					atomic_read(&osc->oo_fast_users) == 0);
-
-			/*
-			 * Blocking AST owns final cache cleanup.
-			 */
-			if (osc->oo_full_pw_lock != NULL) {
-				struct ldlm_lock *old;
-
-				old = osc->oo_full_pw_lock;
-				osc->oo_full_pw_lock = NULL;
-				LDLM_LOCK_PUT(old);
-			}
-
-			atomic_set(&osc->oo_full_pw_granted,
-					OSC_PW_CACHE_DISABLED);
-
-			atomic_set(&osc->oo_pw_replacing, 0);
-			wake_up_all(&osc->oo_fast_waitq);
-		}
-
-cache_done:
-        /* ych */
+		osc_pw_cache_clear(osc);
+		/* ych */
 
 		ldlm_lock2handle(dlmlock, &lockh);
 		result = ldlm_cli_cancel(&lockh, LCF_ASYNC);

@@ -28,4 +28,4 @@ size=5G
 
 ;end_fsync=1
 ;fsync_on_close=1
-;fsync=10000
+fsync=100
