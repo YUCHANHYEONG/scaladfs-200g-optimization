@@ -1098,7 +1098,7 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
-		if (atomic_read(&osc->oo_full_pw_granted) != OSC_PW_CACHE_ACTIVE) {
+		if (atomic_read(&osc->oo_pw_state) != OSC_PW_CACHE_ACTIVE) {
 			fast_path = false;
 			break;
 		}
@@ -1123,24 +1123,25 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 		oio = osc_env_io(sub->sub_env);
 		osc = cl2osc(oio->oi_cl.cis_obj);
 
-		if (atomic_read(&osc->oo_full_pw_granted) != OSC_PW_CACHE_ACTIVE)
+		if (atomic_read(&osc->oo_pw_state) != OSC_PW_CACHE_ACTIVE)
 			goto normal;
 
 		atomic_inc(&osc->oo_fast_users);
 
 		smp_mb__after_atomic();
 
-		if (atomic_read(&osc->oo_full_pw_granted) != OSC_PW_CACHE_ACTIVE) {
+		if (atomic_read(&osc->oo_pw_state) != OSC_PW_CACHE_ACTIVE) {
 			if (atomic_dec_and_test(&osc->oo_fast_users))
 				wake_up_all(&osc->oo_fast_waitq);
 
 			goto normal;
 		}
 
-		/* From here, Blocking AST cannot release the cached lock
+		/* 
+		 * From here, Blocking AST cannot release the cached lock
 		 * until oo_fast_users drops to zero
 		 */
-		pwlock = osc->oo_full_pw_lock;
+		pwlock = osc->oo_cached_pw_lock;
 		if (pwlock == NULL) {
 			if (atomic_dec_and_test(&osc->oo_fast_users))
 				wake_up_all(&osc->oo_fast_waitq);
@@ -1148,16 +1149,18 @@ static int lov_io_lock_internal(const struct lu_env *env, const struct cl_io_sli
 			goto normal;
 		}
 
-		req_start = sub->sub_io.u.ci_rw.crw_pos;
-		req_end = req_start + sub->sub_io.u.ci_rw.crw_count - 1;
+		if (!atomic_read(&osc->oo_pw_full_range)) {
+			req_start = sub->sub_io.u.ci_rw.crw_pos;
+			req_end = req_start + sub->sub_io.u.ci_rw.crw_count - 1;
 
-		ext = &pwlock->l_policy_data.l_extent;
+			ext = &pwlock->l_policy_data.l_extent;
 
-		if (ext->start > req_start || ext->end < req_end) {
-			if (atomic_dec_and_test(&osc->oo_fast_users))
-				wake_up_all(&osc->oo_fast_waitq);
+			if (ext->start > req_start || ext->end < req_end) {
+				if (atomic_dec_and_test(&osc->oo_fast_users))
+					wake_up_all(&osc->oo_fast_waitq);
 
-			goto normal;
+				goto normal;
+			}
 		}
 
 		/*

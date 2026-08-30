@@ -51,6 +51,13 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
+# Linux kernel build-generated files
+linux-kernel/.version
+linux-kernel/include/config/
+linux-kernel/include/generated/
+linux-kernel/kernel/kheaders_data.tar.*
+linux-kernel/scripts/kconfig/zconf.*
+
 *.Plo
 *.Po
 *.state

@@ -256,7 +256,7 @@ struct osc_object_operations {
 };
 
 /* ych	*/
-enum osc_pw_cache_state {
+enum osc_pw_state {
 	OSC_PW_CACHE_DISABLED = 0,
 	OSC_PW_CACHE_ACTIVE,
 	OSC_PW_CACHE_REPLACING,
@@ -327,9 +327,10 @@ struct osc_object {
 	const struct osc_object_operations *oo_obj_ops;
 	bool			oo_initialized;
 
-	/* ych: full PW fast path	*/
-	atomic_t		oo_full_pw_granted;
-	struct ldlm_lock	*oo_full_pw_lock;
+	/* ych: cached PW lock fast path	*/
+	atomic_t		oo_pw_state;
+	struct ldlm_lock	*oo_cached_pw_lock;
+	atomic_t		oo_pw_full_range;
 	atomic_t		oo_fast_users;
 	wait_queue_head_t	oo_fast_waitq;
 	atomic_t		oo_pw_replacing;

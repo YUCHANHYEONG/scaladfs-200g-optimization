@@ -66,11 +66,12 @@ int osc_object_init(const struct lu_env *env, struct lu_object *obj,
         const struct cl_object_conf *cconf = lu2cl_conf(conf);
 
 	/* ych	*/
-	atomic_set(&osc->oo_full_pw_granted, 0);
-	osc->oo_full_pw_lock = NULL;
+	atomic_set(&osc->oo_pw_state, 0);
+	osc->oo_cached_pw_lock = NULL;
 	atomic_set(&osc->oo_fast_users, 0);
 	init_waitqueue_head(&osc->oo_fast_waitq);
 	atomic_set(&osc->oo_pw_replacing, 0);
+	atomic_set(&osc->oo_pw_full_range, 0);
 	/* ych	*/
 
 	osc->oo_oinfo = cconf->u.coc_oinfo;
@@ -125,12 +126,14 @@ void osc_object_free(const struct lu_env *env, struct lu_object *obj)
 	LASSERT(atomic_read(&osc->oo_nr_ios) == 0);
 
 	/* ych	*/
-	atomic_set(&osc->oo_full_pw_granted, 0);
+	atomic_set(&osc->oo_pw_state, 0);
 
-	if (osc->oo_full_pw_lock != NULL) {
-		LDLM_LOCK_PUT(osc->oo_full_pw_lock);
-		osc->oo_full_pw_lock = NULL;
+	if (osc->oo_cached_pw_lock != NULL) {
+		LDLM_LOCK_PUT(osc->oo_cached_pw_lock);
+		osc->oo_cached_pw_lock = NULL;
 	}
+
+	atomic_set(&osc->oo_pw_full_range, 0);
 	/* ych	*/
 
 	lu_object_fini(obj);
