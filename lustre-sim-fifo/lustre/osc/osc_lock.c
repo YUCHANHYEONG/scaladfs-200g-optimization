@@ -701,13 +701,6 @@ retry:
 			}
 
 			/*
-			 * No cached PW lock and no pointer operation in progress.
-			 */
-			if (state == OSC_PW_CACHE_DISABLED &&
-				atomic_read(&osc->oo_pw_replacing) == 0)
-				goto cache_done;
-
-			/*
 			 * Blocking AST always wins.
 			 * Stop cache registration/replacement and new fast-path I/O.
 			 */
@@ -757,9 +750,7 @@ retry:
 			atomic_set(&osc->oo_pw_replacing, 0);
 			wake_up_all(&osc->oo_fast_waitq);
 		}
-
-cache_done:
-        /* ych */
+		/* ych */
 
 		ldlm_lock2handle(dlmlock, &lockh);
 		result = ldlm_cli_cancel(&lockh, LCF_ASYNC);
