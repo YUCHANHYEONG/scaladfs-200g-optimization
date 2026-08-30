@@ -17,7 +17,6 @@
 *.pch
 
 # Libraries
-*.lib
 *.a
 *.la
 *.lo
@@ -43,7 +42,8 @@
 *.pdb
 
 # Kernel Module Compile Results
-*.mod*
+*.mod
+*.mod.c
 *.cmd
 .tmp_versions/
 modules.order
@@ -58,6 +58,7 @@ linux-kernel/include/generated/
 linux-kernel/kernel/kheaders_data.tar.*
 linux-kernel/scripts/kconfig/zconf.*
 
+# Automake build artifacts
 *.Plo
 *.Po
 *.state

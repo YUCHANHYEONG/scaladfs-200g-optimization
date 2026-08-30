@@ -18,7 +18,6 @@
 *.pch
 
 # Libraries
-*.lib
 *.a
 *.la
 *.lo
@@ -44,7 +43,8 @@
 *.pdb
 
 # Kernel Module Compile Results
-*.mod*
+*.mod
+*.mod.c
 *.cmd
 .tmp_versions/
 modules.order
@@ -63,14 +63,28 @@ perf.data*
 tags
 TAGS
 
-# Linux kernel build artifacts (common)
-.tmp_vmlinux*
-vmlinux*
-System.map*
-*/boot/compressed/vmlinux.bin
-*/boot/bzImage
-.config*
-include/generated/
-arch/*/include/generated/
+# Linux kernel build artifacts
+/linux-kernel/.tmp_vmlinux*
+/linux-kernel/vmlinux*
+/linux-kernel/System.map*
+/linux-kernel/.config*
+/linux-kernel/include/config/
+/linux-kernel/include/generated/
+/linux-kernel/arch/*/include/generated/
+/linux-kernel/arch/*/boot/compressed/vmlinux.bin
+/linux-kernel/arch/*/boot/bzImage
+/linux-kernel/kernel/kheaders_data.tar.*
 
+# Generated kernel configuration parser files
+/linux-kernel/scripts/kconfig/zconf.*
+
+# Automake build artifacts
+*.Plo
+*.Po
+*.state
+
+# PCU
 /pcu/
+
+/linux-kernel/arch/*/boot/compressed/vmlinux.bin*
+/linux-kernel/arch/*/boot/vmlinux.bin
