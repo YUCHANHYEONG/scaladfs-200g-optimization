@@ -1785,11 +1785,6 @@ static void osc_exit_cache(struct client_obd *cli, struct osc_async_page *oap)
 KTDEF(osc_enter_cache_atomic);
 EXPORT_SYMBOL(osc_enter_cache_atomic_clock);
 
-static atomic64_t ych_grant_fail = ATOMIC64_INIT(0);
-static atomic64_t ych_cli_dirty_fail = ATOMIC64_INIT(0);
-static atomic64_t ych_cpu_dirty_fail = ATOMIC64_INIT(0);
-static atomic64_t ych_cache_try_fail = ATOMIC64_INIT(0);
-
 /**
  * Non-blocking version of osc_enter_cache() that consumes grant only when it
  * is available.
@@ -1804,8 +1799,7 @@ static int osc_enter_cache_try(struct client_obd *cli,
 	OSC_DUMP_GRANT(D_CACHE, cli, "need:%d\n", bytes);
 
 	rc = osc_reserve_grant(cli, bytes);
-	if (rc < 0){
-		atomic64_inc(&ych_grant_fail);
+	if (rc < 0) {
 		return 0;
 	}
 
@@ -1823,13 +1817,8 @@ static int osc_enter_cache_try(struct client_obd *cli,
 			rc = 1;
 			goto out;
 		} else{
-			// atomic_long_dec(&obd_dirty_pages);
-			atomic64_inc(&ych_cpu_dirty_fail);
 			__this_cpu_dec(obd_dirty_pages_cpu);
-			//pr_info("obd_dirty_pages_cpu = %ld, obd_max_dirty_pages = %ld\n", __this_cpu_read(obd_dirty_pages_cpu), obd_max_dirty_pages);
 		}
-	} else {
-		atomic64_inc(&ych_cli_dirty_fail);
 	}
 
 	__osc_unreserve_grant(cli, bytes, bytes);
@@ -2014,53 +2003,11 @@ static int osc_enter_cache(const struct lu_env *env, struct client_obd *cli,
 	 * and no dirty pages caching, that really means there is no space
 	 * on the OST.
 	 */
-
-//	ktget(&localclock[0]);
-//	remain = wait_event_idle_exclusive_timeout_cmd(
-//		cli->cl_cache_waiters,
-//		(entered = osc_enter_cache_try(cli, oap, bytes)) ||
-//		(cli->cl_dirty_pages == 0 && cli->cl_w_in_flight == 0),
-//		timeout,
-//		cli_unlock_and_unplug(env, cli, oap),
-//		cli_lock_after_unplug(cli));
-//	ktget(&localclock[1]);
-//	ktput(localclock, osc_enter_cache_wait);
-
-	// ktget(&localclock[0]);
-	// remain = wait_event_idle_exclusive_timeout_cmd(
-	// 	cli->cl_cache_waiters,
-	// 	(entered = osc_enter_cache_try(cli, oap, bytes)) ||
-	// 	(cli->cl_dirty_pages == 0 && cli->cl_w_in_flight == 0),
-	// 	timeout,
-	// 	application_unlock_and_unplug(env, cli, oap, set),
-	// 	cli_lock_after_unplug(cli));
-	// ktget(&localclock[1]);
-	// ktput(localclock, osc_enter_cache_wait);
-
 	ktget(&localclock[0]);
 	entered = osc_enter_cache_try(cli, oap, bytes);
 	ktget(&localclock[1]);
 	ktput(localclock, ych_osc_enter_cache_try_1);
 	if (entered == 0){
-		unsigned long before_dirty;
-		unsigned long after_dirty;
-		unsigned long dirty_max;
-		__u32 before_inflight;
-		__u32 after_inflight;
-		unsigned long before_rpcs;
-		unsigned long after_rpcs;
-		unsigned long max_rpcs;
-		s64 fail_count;
-
-		fail_count = atomic64_inc_return(&ych_cache_try_fail);
-
-		before_dirty = cli->cl_dirty_pages;
-		dirty_max = cli->cl_dirty_max_pages;
-		before_inflight = cli->cl_w_in_flight;
-
-		before_rpcs = rpcs_in_flight(cli);
-		max_rpcs = cli->cl_max_rpcs_in_flight;
-
 		ktget(&localclock[0]);
 		application_unlock_and_unplug(env, cli, oap, set);
 		ktget(&localclock[1]);
@@ -2071,25 +2018,10 @@ static int osc_enter_cache(const struct lu_env *env, struct client_obd *cli,
 		ktget(&localclock[1]);
 		ktput(localclock, cli_lock_after_unplug);
 
-		after_dirty = cli->cl_dirty_pages;
-		after_inflight = cli->cl_w_in_flight;
-		after_rpcs = rpcs_in_flight(cli);
-
 		ktget(&localclock[0]);
 		entered = osc_enter_cache_try(cli, oap, bytes);
 		ktget(&localclock[1]);
 		ktput(localclock, ych_osc_enter_cache_try_2);
-
-		if (fail_count % 1000 == 0) {
-			printk("YCH_CACHE_FAIL total=%lld osc=%s "
-					"before_dirty=%lu dirty_max=%lu "
-					"before_w=%u before_rpcs=%lu max_rpcs=%lu "
-					"after_dirty=%lu after_w=%u after_rpcs=%lu "
-					"second_try=%d\n",
-					fail_count, cli_name(cli), before_dirty, dirty_max, before_inflight, before_rpcs, max_rpcs,
-					after_dirty, after_inflight, after_rpcs, entered); 
-		}
-
 	}
 
 	remain = timeout;
@@ -2988,8 +2920,6 @@ __must_hold(&cli->cl_loi_list_lock)
 KTDEF(cl_loi_list_lock_application_check_rpcs);
 EXPORT_SYMBOL(cl_loi_list_lock_application_check_rpcs_clock);
 
-static atomic64_t ych_rpc_limit_hit = ATOMIC64_INIT(0);
-
 static void application_check_rpcs(const struct lu_env *env, struct client_obd *cli, struct ptlrpc_request_set *set)
 __must_hold(&cli->cl_loi_list_lock)
 {
@@ -3010,20 +2940,6 @@ __must_hold(&cli->cl_loi_list_lock)
 		 * writing out pages in a timely manner LU-13131 */
 		if (osc_max_rpc_in_flight(cli, osc) &&
 		    list_empty(&osc->oo_hp_exts)) {
-			s64 hit;
-
-			hit = atomic64_inc_return(&ych_rpc_limit_hit);
-
-			if (hit % 1000 == 0) {
-				printk("YCH_RPC_LIMIT "
-						"hit=%lld osc=%s "
-						"rpcs=%lu read=%u write=%u max=%u "
-						"dirty=%lu dirty_max=%lu\n",
-						hit, cli_name(cli), rpcs_in_flight(cli),
-						cli->cl_r_in_flight, cli->cl_w_in_flight,
-						cli->cl_max_rpcs_in_flight, cli->cl_dirty_pages,
-						cli->cl_dirty_max_pages);
-			}
 			__osc_list_maint(cli, osc);
 			break;
 		}
