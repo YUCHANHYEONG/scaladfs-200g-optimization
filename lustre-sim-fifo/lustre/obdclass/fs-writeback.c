@@ -2443,18 +2443,28 @@ static long __writeback_inodes_wb(struct bdi_writeback *wb,
 static long __lustre_writeback_single(struct bdi_writeback *wb, struct inode *inode,
 				  struct wb_writeback_work *work)
 {
-	// unsigned long start_time = jiffies;
 	long wrote = 0;
 	struct super_block *sb = inode->i_sb;
+	struct LNode *lnode;
 
 	if (!trylock_super(sb)) {
 		/*
-			* trylock_super() may fail consistently due to
-			* s_umount being grabbed by someone else. Don't use
-			* requeue_io() to avoid busy retrying the inode/sb.
-			*/
+		* trylock_super() may fail consistently due to
+		* s_umount being grabbed by someone else. Don't use
+		* requeue_io() to avoid busy retrying the inode/sb.
+		*/
 		pr_info("Failed to lock super block\n");
-		redirty_tail(inode, wb);
+
+		lnode = AllocInodeNode(&inode->i_io_list);
+		if (unlikely(!lnode)) {
+			pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+					__func__, inode);
+			return wrote;
+		}
+		spin_lock(&inode->i_lock);
+		redirty_tail_locked_prealloc(inode, wb, lnode);
+		spin_unlock(&inode->i_lock);
+
 		return wrote;
 	}
 
@@ -2462,14 +2472,6 @@ static long __lustre_writeback_single(struct bdi_writeback *wb, struct inode *in
 
 	up_read(&sb->s_umount);
 
-	/* refer to the same tests at the end of writeback_sb_inodes */
-	// if (wrote) {
-	// 	if (time_is_before_jiffies(start_time + HZ / 10UL))
-	// 		break;
-	// 	if (work->nr_pages <= 0)
-	// 		break;
-	// }
-	/* Leave any unwritten inodes on b_io */
 	return wrote;
 }
 
