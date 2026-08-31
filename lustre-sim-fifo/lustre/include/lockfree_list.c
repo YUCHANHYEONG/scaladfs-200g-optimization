@@ -7,8 +7,8 @@
 #include "../include/lockfree_list.h"
 #include "../include/calclock.h"
 
-#define mem_alloc(size) kmalloc(size, GFP_ATOMIC)
-//#define mem_alloc(size) kmalloc(size, GFP_KERNEL)
+//#define mem_alloc(size) kmalloc(size, GFP_ATOMIC)
+#define mem_alloc(size) kmalloc(size, GFP_KERNEL)
 
 static bool marked( struct LNode* node)
 {
@@ -189,19 +189,59 @@ InitNode(struct LNode *node, struct list_head *inode)
 	node->next = NULL;
 }
 
+struct LNode *AllocInodeNode(struct list_head *inode)
+{
+	struct LNode *lnode;
+
+	lnode = kmalloc(sizeof(*lnode), GFP_KERNEL);
+	if (!lnode)
+		lnode = kmalloc(sizeof(*lnode), GFP_ATOMIC);
+
+	if (!lnode)
+		return NULL;
+
+	InitNode(lnode, inode);
+
+	return lnode;
+}
+EXPORT_SYMBOL(AllocInodeNode);
+
+void InsertInodePrealloc(struct ListRL *list_rl,
+		struct LNode *lnode, bool writer)
+{
+	int ret = 0;
+
+#if HASH_MODE
+	int i;
+
+	if (!lnode)
+		return;
+
+	i = hash_list_head(lnode->inode);
+
+	do {
+		ret = InsertNodeRW(&list_rl->head[i], lnode, false);
+	} while (ret);
+
+#else
+	__iget(list_entry(lnode->inode, struct inode, i_io_list));
+
+	do {
+		ret = InsertNodeRW(&list_rl->head, lnode, false);
+	} while (ret);
+#endif
+}
+EXPORT_SYMBOL(InsertInodePrealloc);
+
 struct RangeLock* __InsertInode(struct ListRL *list_rl,
 	struct list_head *inode, bool try)
 {
-//	struct RangeLock *rl;
 	struct LNode *lnode;
 	int ret = 0;
 
 #if HASH_MODE
 	int i;
 
-//	rl = mem_alloc(sizeof(struct RangeLock));
-//	if (!rl)
-//		return NULL;
 	lnode = mem_alloc(sizeof(struct LNode));
 	if (!lnode)
 		goto free_rl;
@@ -210,14 +250,7 @@ struct RangeLock* __InsertInode(struct ListRL *list_rl,
 	i = hash_list_head(inode);
 	do {
 		ret = InsertNodeRW(&list_rl->head[i], lnode, false);
-//		if (try && ret < 0) {
-//			kfree(rl);
-//			goto free_rl;
-//		}
 	} while	(ret);
-//	rl->bucket = i;
-//	rl->node[i] = lnode;
-//	return rl;
 	return NULL;
 
 #else
@@ -238,7 +271,6 @@ struct RangeLock* __InsertInode(struct ListRL *list_rl,
 	__iget(list_entry(inode, struct inode, i_io_list));
 	/* ych	*/
 
-	// pr_debug("Lnode inode: %p\n", lnode->inode);
 	do {
 		ret = InsertNodeRW(&list_rl->head, lnode, false);
 		if (try && ret < 0)
@@ -249,7 +281,6 @@ struct RangeLock* __InsertInode(struct ListRL *list_rl,
 	return rl;
 #endif
 free_rl:
-//	kfree(rl);
 	return NULL;
 }
 EXPORT_SYMBOL(__InsertInode);

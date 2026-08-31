@@ -67,6 +67,9 @@ static inline struct RangeLock* InsertInode(struct ListRL* list_rl,
 
 /* ych	*/
 void MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
+
+struct LNode *AllocInodeNode(struct list_head *inode);
+void InsertInodePrealloc(struct ListRL *list_rl, struct LNode *lnode, bool writer);
 /* ych	*/
 
 void bucket_init(struct ListRL *list_rl);
