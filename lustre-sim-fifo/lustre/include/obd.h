@@ -1456,6 +1456,11 @@ static inline void client_adjust_max_dirty(struct client_obd *cli)
 	 * number of MBs. */
 	cli->cl_dirty_max_pages = round_up(cli->cl_dirty_max_pages,
 					   1 << (20 - PAGE_SHIFT));
+
+	/* ych: temporary experiment    */
+        //cli->cl_dirty_max_pages = (64UL * 1024 * 1024 * 1024) >> PAGE_SHIFT;
+        //cli->cl_dirty_max_pages = 917504UL;
+        /* ych  */
 }
 
 /* Must be used for page cache pages only,
