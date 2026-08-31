@@ -19,6 +19,7 @@ group_reporting
 
 [amd2]
 size=5G
+;size=2G
 ;size=100M
 ;nrfiles=2
 ;ioengine=libaio
