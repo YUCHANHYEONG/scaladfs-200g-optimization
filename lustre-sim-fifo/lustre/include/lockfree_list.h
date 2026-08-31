@@ -71,4 +71,10 @@ int MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
 
 void bucket_init(struct ListRL *list_rl);
 
+struct LNode *AllocInodeNode(struct list_head *inode);
+
+void InsertInodePrealloc(struct ListRL *list_rl,
+                         struct LNode *lnode,
+                         bool writer);
+
 #endif /* LOCKFREE_LIST_H */

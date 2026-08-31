@@ -37,6 +37,11 @@ extern bool trylock_super(struct super_block *sb); //Kiet
 extern void inode_add_lru(struct inode *inode);
 extern long get_nr_dirty_inodes(void);
 
+extern struct LNode *AllocInodeNode(struct list_head *inode);
+extern void InsertInodePrealloc(struct ListRL *list_rl,
+                                struct LNode *lnode,
+                                bool writer);
+
 /*
  * 4MB minimal write chunk size
  */
@@ -145,6 +150,41 @@ EXPORT_SYMBOL(InsertInode_clock);
  * Returns %true if @inode is the first occupant of the !dirty_time IO
  * lists; otherwise, %false.
  */
+static bool inode_io_list_move_locked_prealloc(struct inode *inode,
+                                               struct bdi_writeback *wb,
+                                               struct list_head *head,
+                                               struct LNode *lnode)
+{
+        ktime_t localclock[2];
+
+        assert_spin_locked(&inode->i_lock);
+
+        list_del_init(&inode->i_io_list);
+
+        ktget(&localclock[0]);
+        InsertInodePrealloc(&wb->lock_free_dirty, lnode, true);
+        ktget(&localclock[1]);
+        ktput(localclock, InsertInode);
+
+        wb_io_lists_depopulated(wb);
+
+        return false;
+}
+
+static void redirty_tail_locked_prealloc(struct inode *inode,
+                                         struct bdi_writeback *wb,
+                                         struct LNode *lnode)
+{
+        assert_spin_locked(&inode->i_lock);
+
+        inode->dirtied_when = jiffies;
+
+        inode_io_list_move_locked_prealloc(inode, wb,
+                                           &wb->test_list, lnode);
+
+        inode->i_state &= ~I_SYNC_QUEUED;
+}
+
 static bool inode_io_list_move_locked(struct inode *inode,
 				      struct bdi_writeback *wb,
 				      struct list_head *head)
@@ -1782,7 +1822,69 @@ static void requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 	}
 }
 
+static bool lustre_requeue_inode_prealloc(struct inode *inode,
+                                          struct bdi_writeback *wb,
+                                          struct writeback_control *wbc,
+                                          struct LNode *lnode)
+{
+        if (inode->i_state & I_FREEING)
+                return false;
 
+        /*
+         * Sync livelock prevention. Each inode is tagged and synced in one
+         * shot. If still dirty, it will be redirty_tail()'ed below. Update
+         * the dirty time to prevent enqueue and sync it again.
+         */
+        if ((inode->i_state & I_DIRTY) &&
+            (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages))
+                inode->dirtied_when = jiffies;
+
+        if (wbc->pages_skipped) {
+                /*
+                 * Writeback is not making progress due to locked
+                 * buffers. Skip this inode for now.
+                 */
+                redirty_tail_locked_prealloc(inode, wb, lnode);
+                return true;
+        }
+
+        if (mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY)) {
+                /*
+                 * We didn't write back all the pages. nfs_writepages()
+                 * sometimes bales out without doing anything.
+                 */
+                redirty_tail_locked_prealloc(inode, wb, lnode);
+                return true;
+
+        } else if (inode->i_state & I_DIRTY) {
+                /*
+                 * Filesystems can dirty the inode during writeback operations,
+                 * such as delayed allocation during submission or metadata
+                 * updates after data IO completion.
+                 */
+                redirty_tail_locked_prealloc(inode, wb, lnode);
+                return true;
+
+        } else if (inode->i_state & I_DIRTY_TIME) {
+                inode->dirtied_when = jiffies;
+
+                redirty_tail_locked_prealloc(inode, wb, lnode);
+
+                inode->i_state &= ~I_SYNC_QUEUED;
+                return true;
+
+        } else {
+                /*
+                 * The inode is clean. Remove from writeback lists.
+                 * The preallocated LNode is not used.
+                 */
+                lustre_inode_cgwb_move_to_attached(inode, wb);
+                return false;
+        }
+}
+
+
+#if 0
 static void lustre_requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 			  struct writeback_control *wbc)
 {
@@ -1840,6 +1942,7 @@ static void lustre_requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 		// spin_unlock(&wb->list_lock);
 	}
 }
+#endif
 
 int lustre_do_writepages(struct address_space *mapping, struct writeback_control *wbc);
 
@@ -2203,124 +2306,128 @@ static long writeback_sb_inodes(struct super_block *sb,
 KTDEF(lustre_requeue_inode);
 EXPORT_SYMBOL(lustre_requeue_inode_clock);
 
-static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback *wb,
-				struct inode *inode,
-				struct wb_writeback_work *work)
+static long lustre_writeback_single(struct super_block *sb,
+                                    struct bdi_writeback *wb,
+                                    struct inode *inode,
+                                    struct wb_writeback_work *work)
 {
-	struct writeback_control wbc = {
-		.sync_mode		= work->sync_mode,
-		.tagged_writepages	= work->tagged_writepages,
-		.for_kupdate		= work->for_kupdate,
-		.for_background		= work->for_background,
-		.for_sync		= work->for_sync,
-		.range_cyclic		= work->range_cyclic,
-		.range_start		= 0,
-		.range_end		= LLONG_MAX,
-	};
-	// unsigned long start_time = jiffies;
-	long write_chunk;
-	long wrote = 0;  /* count both pages and inodes */
-	ktime_t localclock[2];
+        struct writeback_control wbc = {
+                .sync_mode              = work->sync_mode,
+                .tagged_writepages      = work->tagged_writepages,
+                .for_kupdate            = work->for_kupdate,
+                .for_background         = work->for_background,
+                .for_sync               = work->for_sync,
+                .range_cyclic           = work->range_cyclic,
+                .range_start            = 0,
+                .range_end              = LLONG_MAX,
+        };
+        long write_chunk;
+        long wrote = 0;
+        ktime_t localclock[2];
 
-	// struct bdi_writeback *tmp_wb;
+        struct LNode *lnode;
+        bool lnode_used;
 
-	/*
-		* Don't bother with new inodes or inodes being freed, first
-		* kind does not need periodic writeout yet, and for the latter
-		* kind writeout is handled by the freer.
-		*/
+        /*
+         * Preallocate LNode before taking inode->i_lock.
+         *
+         * This LNode is used only when the inode must be requeued
+         * before writeback because it is NEW/FREEING/WILL_FREE.
+         */
+        lnode = AllocInodeNode(&inode->i_io_list);
+        if (unlikely(!lnode)) {
+                pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+                                   __func__, inode);
+                return wrote;
+        }
 
-	spin_lock(&inode->i_lock);
-	if (inode->i_state & (I_NEW | I_FREEING | I_WILL_FREE)) {
-		// spin_lock(&wb->list_lock);
-		redirty_tail_locked(inode, wb);
-		// spin_unlock(&wb->list_lock);
-		spin_unlock(&inode->i_lock);
-		return wrote;
-	}
+        spin_lock(&inode->i_lock);
 
-	/*
-		* We already requeued the inode if it had I_SYNC set and we
-		* are doing WB_SYNC_NONE writeback. So this catches only the
-		* WB_SYNC_ALL case.
-		*/
-	// if (inode->i_state & I_SYNC) { // Sleep on I_SYNC
-	// 	/* Wait for I_SYNC. This function drops i_lock... */
-	// 	// pr_info("Meet I_SYNC \n");
-	// 	// spin_unlock(&inode->i_lock);
-	// 	// return wrote;
-	// 	pr_info("Sleep on I_SYNC\n");
-	// 	inode_sleep_on_writeback(inode);
-	// 	pr_info("Wakeup from I_SYNC\n");
-	// 	spin_lock(&inode->i_lock);
-	// }
-	inode->i_state |= I_SYNC;
-	lustre_wbc_attach_and_unlock_inode(&wbc, inode);
+        /*
+         * Don't bother with new inodes or inodes being freed.
+         * Requeue them without allocating memory while holding i_lock.
+         */
+        if (inode->i_state & (I_NEW | I_FREEING | I_WILL_FREE)) {
+                redirty_tail_locked_prealloc(inode, wb, lnode);
+                spin_unlock(&inode->i_lock);
+                return wrote;
+        }
 
-	write_chunk = writeback_chunk_size(wb, work);
-	wbc.nr_to_write = write_chunk;
-	wbc.pages_skipped = 0;
+        inode->i_state |= I_SYNC;
 
+        /*
+         * This function releases inode->i_lock.
+         */
+        lustre_wbc_attach_and_unlock_inode(&wbc, inode);
 
-	/*
-		* We use I_SYNC to pin the inode in memory. While it is set
-		* evict_inode() will wait so the inode cannot be freed.
-		*/
-	ktget(&localclock[0]);
-	__writeback_single_inode(inode, &wbc);
-	ktget(&localclock[1]);
-	ktput(localclock, __writeback_single_inode);
+        /*
+         * The preallocated LNode was not used because the inode
+         * proceeded to normal writeback.
+         */
+        kfree(lnode);
+        lnode = NULL;
 
-	wbc_detach_inode(&wbc);
-	work->nr_pages -= write_chunk - wbc.nr_to_write;
-	wrote += write_chunk - wbc.nr_to_write;
+        write_chunk = writeback_chunk_size(wb, work);
+        wbc.nr_to_write = write_chunk;
+        wbc.pages_skipped = 0;
 
-	// if (need_resched()) {
-	// 	/*
-	// 		* We're trying to balance between building up a nice
-	// 		* long list of IOs to improve our merge rate, and
-	// 		* getting those IOs out quickly for anyone throttling
-	// 		* in balance_dirty_pages().  cond_resched() doesn't
-	// 		* unplug, so get our IOs out the door before we
-	// 		* give up the CPU.
-	// 		*/
-	// 	blk_flush_plug(current);
-	// 	cond_resched();
-	// }
+        /*
+         * We use I_SYNC to pin the inode in memory. While it is set
+         * evict_inode() will wait so the inode cannot be freed.
+         */
+        ktget(&localclock[0]);
+        __writeback_single_inode(inode, &wbc);
+        ktget(&localclock[1]);
+        ktput(localclock, __writeback_single_inode);
 
-	/*
-		* Requeue @inode if still dirty.  Be careful as @inode may
-		* have been switched to another wb in the meantime.
-		*/
-	// ktget(&localclock[0]);
-	// tmp_wb = inode_to_wb_and_lock_list(inode);
-	// ktget(&localclock[1]);
-	// ktput(localclock, inode_to_wb_and_lock_list);
-	spin_lock(&inode->i_lock);
-	if (!(inode->i_state & I_DIRTY_ALL))
-		wrote++;
+        wbc_detach_inode(&wbc);
 
-	ktget(&localclock[0]);
-	lustre_requeue_inode(inode, wb, &wbc);
-	ktget(&localclock[1]);
-	ktput(localclock, lustre_requeue_inode);
-	inode_sync_complete(inode);
+        work->nr_pages -= write_chunk - wbc.nr_to_write;
+        wrote += write_chunk - wbc.nr_to_write;
 
-	spin_unlock(&inode->i_lock);
+        /*
+         * Preallocate another LNode before taking inode->i_lock.
+         *
+         * This one is used if the inode is still dirty after writeback
+         * and must be inserted into the dirty inode queue again.
+         */
+        lnode = AllocInodeNode(&inode->i_io_list);
+        if (unlikely(!lnode)) {
+                pr_err_ratelimited("[%s] failed to allocate requeue LNode for inode %p\n",
+                                   __func__, inode);
 
+                spin_lock(&inode->i_lock);
+                inode_sync_complete(inode);
+                spin_unlock(&inode->i_lock);
 
-	/*
-		* bail out to wb_writeback() often enough to check
-		* background threshold and other termination conditions.
-		*/
-	// if (wrote) {
-	// 	if (time_is_before_jiffies(start_time + HZ / 10UL))
-	// 		break;
-	// 	if (work->nr_pages <= 0)
-	// 		break;
-	// }
-	return wrote;
+                return wrote;
+        }
+
+        spin_lock(&inode->i_lock);
+
+        if (!(inode->i_state & I_DIRTY_ALL))
+                wrote++;
+
+        ktget(&localclock[0]);
+        lnode_used = lustre_requeue_inode_prealloc(inode, wb,
+                                                   &wbc, lnode);
+        ktget(&localclock[1]);
+        ktput(localclock, lustre_requeue_inode_prealloc);
+
+        inode_sync_complete(inode);
+
+        spin_unlock(&inode->i_lock);
+
+        /*
+         * Clean inode: no requeue occurred, so the preallocated
+         * LNode was not consumed.
+         */
+        if (!lnode_used)
+                kfree(lnode);
+
+        return wrote;
 }
+
 
 
 static long __writeback_inodes_wb(struct bdi_writeback *wb,
@@ -2357,37 +2464,41 @@ static long __writeback_inodes_wb(struct bdi_writeback *wb,
 	return wrote;
 }
 
-static long __lustre_writeback_single(struct bdi_writeback *wb, struct inode *inode,
-				  struct wb_writeback_work *work)
+static long __lustre_writeback_single(struct bdi_writeback *wb,
+                                      struct inode *inode,
+                                      struct wb_writeback_work *work)
 {
-	// unsigned long start_time = jiffies;
-	long wrote = 0;
-	struct super_block *sb = inode->i_sb;
+        long wrote = 0;
+        struct super_block *sb = inode->i_sb;
+        struct LNode *lnode;
 
-	if (!trylock_super(sb)) {
-		/*
-			* trylock_super() may fail consistently due to
-			* s_umount being grabbed by someone else. Don't use
-			* requeue_io() to avoid busy retrying the inode/sb.
-			*/
-		pr_info("Failed to lock super block\n");
-		redirty_tail(inode, wb);
-		return wrote;
-	}
+        if (!trylock_super(sb)) {
+                /*
+                 * trylock_super() may fail consistently due to
+                 * s_umount being grabbed by someone else. Don't use
+                 * requeue_io() to avoid busy retrying the inode/sb.
+                 */
+                pr_info("Failed to lock super block\n");
 
-	wrote += lustre_writeback_single(sb, wb, inode, work);
+                lnode = AllocInodeNode(&inode->i_io_list);
+                if (unlikely(!lnode)) {
+                        pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+                                           __func__, inode);
+                        return wrote;
+                }
 
-	up_read(&sb->s_umount);
+                spin_lock(&inode->i_lock);
+                redirty_tail_locked_prealloc(inode, wb, lnode);
+                spin_unlock(&inode->i_lock);
 
-	/* refer to the same tests at the end of writeback_sb_inodes */
-	// if (wrote) {
-	// 	if (time_is_before_jiffies(start_time + HZ / 10UL))
-	// 		break;
-	// 	if (work->nr_pages <= 0)
-	// 		break;
-	// }
-	/* Leave any unwritten inodes on b_io */
-	return wrote;
+                return wrote;
+        }
+
+        wrote += lustre_writeback_single(sb, wb, inode, work);
+
+        up_read(&sb->s_umount);
+
+        return wrote;
 }
 
 static long writeback_inodes_wb(struct bdi_writeback *wb, long nr_pages,
@@ -3021,130 +3132,142 @@ static noinline void block_dump___mark_inode_dirty(struct inode *inode)
  */
 void __lustre_mark_inode_dirty(struct inode *inode, int flags)
 {
-	struct super_block *sb = inode->i_sb;
-	int dirtytime;
-	struct bdi_writeback *wb = NULL;
-	//printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
+        struct super_block *sb = inode->i_sb;
+        int dirtytime;
+        struct bdi_writeback *wb = NULL;
+        struct LNode *lnode;
+        bool lnode_used = false;
 
-	// trace_writeback_mark_inode_dirty(inode, flags);
+        /*
+         * Don't do this for I_DIRTY_PAGES - that doesn't actually
+         * dirty the inode itself.
+         */
+        if (flags & (I_DIRTY_INODE | I_DIRTY_TIME)) {
+                if (sb->s_op->dirty_inode)
+                        sb->s_op->dirty_inode(inode, flags);
+        }
 
-	/*
-	 * Don't do this for I_DIRTY_PAGES - that doesn't actually
-	 * dirty the inode itself
-	 */
-	if (flags & (I_DIRTY_INODE | I_DIRTY_TIME)) {
-		// trace_writeback_dirty_inode_start(inode, flags);
+        if (flags & I_DIRTY_INODE)
+                flags &= ~I_DIRTY_TIME;
 
-		if (sb->s_op->dirty_inode)
-			sb->s_op->dirty_inode(inode, flags);
+        dirtytime = flags & I_DIRTY_TIME;
 
-		// trace_writeback_dirty_inode(inode, flags);
-	}
-	if (flags & I_DIRTY_INODE)
-		flags &= ~I_DIRTY_TIME;
-	dirtytime = flags & I_DIRTY_TIME;
+        /*
+         * Paired with smp_mb() in __writeback_single_inode() for the
+         * following lockless i_state test.
+         */
+        smp_mb();
 
-	/*
-	 * Paired with smp_mb() in __writeback_single_inode() for the
-	 * following lockless i_state test.  See there for details.
-	 */
-	smp_mb();
-//	printk("[%s] inode->i_state = %ld, flags = %d\n", __func__, inode->i_state, flags);
+        if (((inode->i_state & flags) == flags) ||
+            (dirtytime && (inode->i_state & I_DIRTY_INODE)))
+                return;
 
-	if (((inode->i_state & flags) == flags) ||
-	    (dirtytime && (inode->i_state & I_DIRTY_INODE)))
-		return;
+        if (unlikely(block_dump))
+                block_dump___mark_inode_dirty(inode);
 
-	if (unlikely(block_dump))
-		block_dump___mark_inode_dirty(inode);
+        /*
+         * Preallocate LNode before taking inode->i_lock.
+         * If the inode does not need to be inserted into the dirty queue,
+         * this node will be freed after releasing i_lock.
+         */
+        lnode = AllocInodeNode(&inode->i_io_list);
+        if (unlikely(!lnode)) {
+                pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+                                   __func__, inode);
+                return;
+        }
 
-	spin_lock(&inode->i_lock);
-	if (dirtytime && (inode->i_state & I_DIRTY_INODE))
-		goto out_unlock_inode;
-	if ((inode->i_state & flags) != flags) {
-		const int was_dirty = inode->i_state & I_DIRTY;
+        spin_lock(&inode->i_lock);
 
-		inode_attach_wb(inode, NULL);
+        if (dirtytime && (inode->i_state & I_DIRTY_INODE))
+                goto out_unlock_inode;
 
-		if (flags & I_DIRTY_INODE)
-			inode->i_state &= ~I_DIRTY_TIME;
-		inode->i_state |= flags;
+        if ((inode->i_state & flags) != flags) {
+                const int was_dirty = inode->i_state & I_DIRTY;
 
-		/*
-		 * Grab inode's wb early because it requires dropping i_lock and we
-		 * need to make sure following checks happen atomically with dirty
-		 * list handling so that we don't move inodes under flush worker's
-		 * hands.
-		 */
-		if (!was_dirty) {
-			// wb = locked_inode_to_wb_and_lock_list(inode);
-			wb = inode_to_wb(inode);
-		}
+                inode_attach_wb(inode, NULL);
 
-		/*
-		 * If the inode is queued for writeback by flush worker, just
-		 * update its dirty state. Once the flush worker is done with
-		 * the inode it will place it on the appropriate superblock
-		 * list, based upon its state.
-		 */
-		if (inode->i_state & I_SYNC_QUEUED)
-			goto out_unlock;
+                if (flags & I_DIRTY_INODE)
+                        inode->i_state &= ~I_DIRTY_TIME;
 
-		/*
-		 * Only add valid (hashed) inodes to the superblock's
-		 * dirty list.  Add blockdev inodes as well.
-		 */
-		if (!S_ISBLK(inode->i_mode)) {
-			if (inode_unhashed(inode))
-				goto out_unlock;
-		}
-		if (inode->i_state & I_FREEING)
-			goto out_unlock;
+                inode->i_state |= flags;
 
-		/*
-		 * If the inode was already on test_list/b_io/b_more_io, don't
-		 * reposition it (that would break test_list time-ordering).
-		 */
-		if (!was_dirty) {
-			struct list_head *dirty_list;
-			bool wakeup_bdi = false;
+                /*
+                 * Grab inode's wb early because it requires dropping i_lock
+                 * and we need to make sure following checks happen atomically
+                 * with dirty list handling.
+                 */
+                if (!was_dirty)
+                        wb = inode_to_wb(inode);
 
-			inode->dirtied_when = jiffies;
-			if (dirtytime)
-				inode->dirtied_time_when = jiffies;
+                /*
+                 * If the inode is already queued for writeback,
+                 * only update its dirty state.
+                 */
+                if (inode->i_state & I_SYNC_QUEUED)
+                        goto out_unlock;
 
-			if (inode->i_state & I_DIRTY)
-				dirty_list = &wb->test_list;
-			else
-				dirty_list = &wb->b_dirty_time;
+                /*
+                 * Only add valid (hashed) inodes to the dirty list.
+                 * Add blockdev inodes as well.
+                 */
+                if (!S_ISBLK(inode->i_mode)) {
+                        if (inode_unhashed(inode))
+                                goto out_unlock;
+                }
 
-			wakeup_bdi = inode_io_list_move_locked(inode, wb,
-							       dirty_list);
+                if (inode->i_state & I_FREEING)
+                        goto out_unlock;
 
-			// spin_unlock(&wb->list_lock);
-			spin_unlock(&inode->i_lock);
-			// trace_writeback_dirty_inode_enqueue(inode);
+                /*
+                 * If the inode was already dirty, don't reposition it.
+                 */
+                if (!was_dirty) {
+                        struct list_head *dirty_list;
+                        bool wakeup_bdi = false;
 
+                        inode->dirtied_when = jiffies;
 
-			// pr_info("Insert inode to dirty list\n");
+                        if (dirtytime)
+                                inode->dirtied_time_when = jiffies;
 
-			/*
-			 * If this is the first dirty inode for this bdi,
-			 * we have to wake-up the corresponding bdi thread
-			 * to make sure background write-back happens
-			 * later.
-			 */
-			if (wakeup_bdi &&
-			    (wb->bdi->capabilities & BDI_CAP_WRITEBACK))
-				wb_wakeup_delayed(wb);
-			return;
-		}
-	}
+                        if (inode->i_state & I_DIRTY)
+                                dirty_list = &wb->test_list;
+                        else
+                                dirty_list = &wb->b_dirty_time;
+
+                        /*
+                         * No allocation occurs here.
+                         * LNode was allocated before taking inode->i_lock.
+                         */
+                        wakeup_bdi =
+                                inode_io_list_move_locked_prealloc(inode,
+                                                                  wb,
+                                                                  dirty_list,
+                                                                  lnode);
+
+                        lnode_used = true;
+
+                        spin_unlock(&inode->i_lock);
+
+                        if (wakeup_bdi &&
+                            (wb->bdi->capabilities & BDI_CAP_WRITEBACK))
+                                wb_wakeup_delayed(wb);
+
+                        return;
+                }
+        }
+
 out_unlock:
-	// if (wb)
-	// 	spin_unlock(&wb->list_lock);
 out_unlock_inode:
-	spin_unlock(&inode->i_lock);
+        spin_unlock(&inode->i_lock);
+
+        /*
+         * The inode was not inserted into the dirty queue,
+         * so the preallocated LNode was not consumed.
+         */
+        if (!lnode_used)
+                kfree(lnode);
 }
 EXPORT_SYMBOL(__lustre_mark_inode_dirty);
 

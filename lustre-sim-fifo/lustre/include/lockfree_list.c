@@ -204,6 +204,49 @@ InitNode(struct LNode *node, struct list_head *inode)
 	node->next = NULL;
 }
 
+struct LNode *AllocInodeNode(struct list_head *inode)
+{
+	struct LNode *lnode;
+
+	lnode = kmalloc(sizeof(*lnode), GFP_KERNEL);
+	if (!lnode)
+		return NULL;
+
+	InitNode(lnode, inode);
+	return lnode;
+}
+EXPORT_SYMBOL(AllocInodeNode);
+
+void InsertInodePrealloc(struct ListRL *list_rl,
+                         struct LNode *lnode,
+                         bool writer)
+{
+        int ret = 0;
+
+#if HASH_MODE
+        int i;
+
+        if (!lnode)
+                return;
+
+        i = hash_list_head(lnode->inode);
+
+        do {
+                ret = InsertNodeRW(&list_rl->head[i], lnode, false);
+        } while (ret);
+#else
+        if (!lnode)
+                return;
+
+        __iget(list_entry(lnode->inode, struct inode, i_io_list));
+
+        do {
+                ret = InsertNodeRW(&list_rl->head, lnode, false);
+        } while (ret);
+#endif
+}
+EXPORT_SYMBOL(InsertInodePrealloc);
+
 struct RangeLock* __InsertInode(struct ListRL *list_rl,
 	struct list_head *inode, bool try)
 {
