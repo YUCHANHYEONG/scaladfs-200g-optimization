@@ -7,7 +7,8 @@
 #include "../include/lockfree_list.h"
 #include "../include/calclock.h"
 
-#define mem_alloc(size) kmalloc(size, GFP_KERNEL)
+#define mem_alloc(size) kmalloc(size, GFP_ATOMIC)
+//#define mem_alloc(size) kmalloc(size, GFP_KERNEL)
 
 static bool marked( struct LNode* node)
 {
