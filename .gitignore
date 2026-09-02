@@ -88,3 +88,4 @@ TAGS
 
 /linux-kernel/arch/*/boot/compressed/vmlinux.bin*
 /linux-kernel/arch/*/boot/vmlinux.bin
+/lustre-sim-fifo/autom4te.cache/
