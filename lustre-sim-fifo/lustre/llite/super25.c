@@ -54,12 +54,10 @@
 #include "lustre_flusher.h"
 
 static struct kmem_cache *ll_inode_cachep;
-struct LNode *AllocInodeNode(struct list_head *inode);
 
 static struct inode *ll_alloc_inode(struct super_block *sb)
 {
 	struct ll_inode_info *lli;
-	struct inode *vfs_inode;
 #ifdef HAVE_ALLOC_INODE_SB
 	lli = alloc_inode_sb(sb, ll_inode_cachep, GFP_NOFS);
 	if (!lli)
@@ -74,11 +72,6 @@ static struct inode *ll_alloc_inode(struct super_block *sb)
 	inode_init_once(&lli->lli_vfs_inode);
 	lli->lli_open_thrsh_count = UINT_MAX;
 
-	vfs_inode = &lli->lli_vfs_inode;
-	lli->lli_lnode = AllocInodeNode(&vfs_inode->i_io_list);
-	if (unlikely(!lli->lli_lnode))
-		printk(KERN_ERR "[%s]: error!\n", __func__);
-
 	return &lli->lli_vfs_inode;
 }
 
@@ -87,10 +80,6 @@ static void ll_inode_destroy_callback(struct rcu_head *head)
 	struct inode *inode = container_of(head, struct inode, i_rcu);
 	struct ll_inode_info *ptr = ll_i2info(inode);
 	llcrypt_free_inode(inode);
-
-	kfree(ptr->lli_lnode);
-	ptr->lli_lnode = NULL;
-
 	OBD_SLAB_FREE_PTR(ptr, ll_inode_cachep);
 }
 
@@ -279,7 +268,6 @@ static int __init lustre_init(void)
 	int rc;
 	unsigned long lustre_inode_cache_flags;
 
-	printk("[%s]: 3\n", __func__);
 	pr_info("Insert module \n");
 
 	init_lflist_head(&lf_b_more_io);

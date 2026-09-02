@@ -4,9 +4,8 @@
 #include <linux/sched.h>
 #include <linux/fs.h>
 
-#include <linux/lockfree_list.h>
+#include "../include/lockfree_list.h"
 #include "../include/calclock.h"
-#include "../llite/llite_internal.h"
 
 //#define mem_alloc(size) kmalloc(size, GFP_ATOMIC)
 #define mem_alloc(size) kmalloc(size, GFP_KERNEL)
@@ -42,14 +41,14 @@ static bool TryMarkNode(struct LNode *lock)
 }
 /* ych	*/
 
-//static void rlock_node_rcu_free(struct rcu_head *head)
-//{
-////	struct LNode *node = container_of(head, struct LNode, rcu);
-//
-////	printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
-////	printk("current->comm = %s\n", current->comm);
-////	kfree(node);
-//}
+static void rlock_node_rcu_free(struct rcu_head *head)
+{
+	struct LNode *node = container_of(head, struct LNode, rcu);
+
+//	printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
+//	printk("current->comm = %s\n", current->comm);
+	kfree(node);
+}
 
 static void DeleteNode(struct LNode* lock)
 {
@@ -115,20 +114,6 @@ restart:
 			cur = next;
 			continue;
 		}
-
-		/* debug */
-		if (unlikely(cur == lock)) {
-			printk(KERN_ERR
-			       "[LNODE DUP] lock=%px cur=%px inode=%px next=%px marked=%d\n",
-			       lock, cur, lock->inode, lock->next,
-			       marked(lock->next));
-			dump_stack();
-
-			rcu_read_unlock();
-			return 0;
-		}
-		/* debug */
-
 
 		lock->next = cur;
 		if (cmpxchg(prev, cur, lock) == cur) {
@@ -248,77 +233,19 @@ void InsertInodePrealloc(struct ListRL *list_rl,
 }
 EXPORT_SYMBOL(InsertInodePrealloc);
 
-//struct RangeLock* __InsertInode(struct ListRL *list_rl,
-//	struct list_head *inode, bool try)
-//{
-//	struct LNode *lnode;
-//	int ret = 0;
-//
-//#if HASH_MODE
-//	int i;
-//
-//	lnode = mem_alloc(sizeof(struct LNode));
-//	if (!lnode)
-//		goto free_rl;
-//	InitNode(lnode, inode);
-//
-//	i = hash_list_head(inode);
-//	do {
-//		ret = InsertNodeRW(&list_rl->head[i], lnode, false);
-//	} while	(ret);
-//	return NULL;
-//
-//#else
-//	rl = mem_alloc(sizeof(struct RangeLock));
-//	if (!rl)
-//		return NULL;
-//	lnode = mem_alloc(sizeof(struct LNode));
-//	if (!lnode){
-//		goto free_rl;
-//	}
-//	InitNode(lnode, inode);
-//
-//	/* ych	*/
-//	/*
-//	 * Each queued LNode owns one inode reference.
-//	 * inode_io_list_move_locked() holds inode->i_lock.
-//	 */
-//	__iget(list_entry(inode, struct inode, i_io_list));
-//	/* ych	*/
-//
-//	do {
-//		ret = InsertNodeRW(&list_rl->head, lnode, false);
-//		if (try && ret < 0)
-//			goto free_rl;
-//	} while(ret);
-//
-//	rl->node = lnode;
-//	return rl;
-//#endif
-//free_rl:
-//	return NULL;
-//}
-
 struct RangeLock* __InsertInode(struct ListRL *list_rl,
-	struct inode *vfs_inode, bool try)
+	struct list_head *inode, bool try)
 {
 	struct LNode *lnode;
 	int ret = 0;
-	struct list_head *inode;
 
 #if HASH_MODE
 	int i;
 
-//	lnode = mem_alloc(sizeof(struct LNode));
-//	if (!lnode)
-//		goto free_rl;
-//	InitNode(lnode, inode);
-
-	inode = &vfs_inode->i_io_list;
-
-	lnode = ll_i2info(vfs_inode)->lli_lnode;
+	lnode = mem_alloc(sizeof(struct LNode));
 	if (!lnode)
-		printk(KERN_ERR "[%s]: error 1\n", __func__);
+		goto free_rl;
+	InitNode(lnode, inode);
 
 	i = hash_list_head(inode);
 	do {
@@ -330,14 +257,11 @@ struct RangeLock* __InsertInode(struct ListRL *list_rl,
 	rl = mem_alloc(sizeof(struct RangeLock));
 	if (!rl)
 		return NULL;
-//	lnode = mem_alloc(sizeof(struct LNode));
-//	if (!lnode){
-//		goto free_rl;
-//	}
-//	InitNode(lnode, inode);
-	lnode = ll_i2info(vfs_inode)->lli_lnode;
-	if (!lnode)
-		printk(KERN_ERR "[%s]: error 1\n", __func__);
+	lnode = mem_alloc(sizeof(struct LNode));
+	if (!lnode){
+		goto free_rl;
+	}
+	InitNode(lnode, inode);
 
 	/* ych	*/
 	/*
@@ -355,11 +279,10 @@ struct RangeLock* __InsertInode(struct ListRL *list_rl,
 
 	rl->node = lnode;
 	return rl;
-free_rl:
 #endif
+free_rl:
 	return NULL;
 }
-
 EXPORT_SYMBOL(__InsertInode);
 
 
@@ -518,7 +441,7 @@ struct list_head* FetchHead(struct ListRL *listrl)
 	int i = atomic_fetch_add_relaxed(1, &listrl->rr) % BUCKET_CNT;
 	if (listrl->head == NULL)
 		return NULL;
-	for (j = 1; j <= BUCKET_CNT; j++) {
+	for (j = 1; j < BUCKET_CNT; j++) {
 		if (listrl->head[i] == NULL){
 			i = atomic_fetch_add_relaxed(1, &listrl->rr) % BUCKET_CNT;
 		}

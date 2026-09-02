@@ -9,7 +9,7 @@
 
 #include <linux/ktime.h>
 #include <linux/percpu.h>
-#include <linux/lockfree_list.h>
+#include "lockfree_list.h"
 
 //#define CONFIG_CALCLOCK
 

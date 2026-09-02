@@ -50,30 +50,20 @@ struct list_head* FetchHead(struct ListRL *listrl);
 struct list_head* FetchTail(struct ListRL *listrl);
 /* ych	*/
 
-//struct RangeLock* __InsertInode(struct ListRL *list_rl,
-//										struct list_head *inode, bool try);
-struct RangeLock* __InsertInode(struct ListRL *list_rl, struct inode *inode, bool try);
+struct RangeLock* __InsertInode(struct ListRL *list_rl,
+										struct list_head *inode, bool try);
 
-
-//static inline struct RangeLock* RWRangeTryAcquire(struct ListRL* list_rl,
-//		struct list_head *inode, bool writer)
-//{
-//	printk(KERN_ERR "[%s]: error!\n", __func__);
-//	return __InsertInode(list_rl, inode, true);
-//}
-
-//static inline struct RangeLock* InsertInode(struct ListRL* list_rl,
-//		struct list_head *inode, bool writer)
-//{
-//	return __InsertInode(list_rl, inode, false);
-//}
+static inline struct RangeLock* RWRangeTryAcquire(struct ListRL* list_rl,
+		struct list_head *inode, bool writer)
+{
+	return __InsertInode(list_rl, inode, true);
+}
 
 static inline struct RangeLock* InsertInode(struct ListRL* list_rl,
-		struct inode *inode, bool writer)
+		struct list_head *inode, bool writer)
 {
 	return __InsertInode(list_rl, inode, false);
 }
-
 
 /* ych	*/
 void MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
