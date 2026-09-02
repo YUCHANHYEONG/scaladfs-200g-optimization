@@ -2327,18 +2327,12 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 		return wrote;
 	}
 
-	spin_unlock(&inode->i_lock);
-
-	if (lnode) {
-		kfree(lnode);
-		lnode = NULL;
-	}
-
+	
 	/*
-		* We already requeued the inode if it had I_SYNC set and we
-		* are doing WB_SYNC_NONE writeback. So this catches only the
-		* WB_SYNC_ALL case.
-		*/
+	* We already requeued the inode if it had I_SYNC set and we
+	* are doing WB_SYNC_NONE writeback. So this catches only the
+	* WB_SYNC_ALL case.
+	*/
 	// if (inode->i_state & I_SYNC) { // Sleep on I_SYNC
 	// 	/* Wait for I_SYNC. This function drops i_lock... */
 	// 	// pr_info("Meet I_SYNC \n");
@@ -2351,6 +2345,11 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 	// }
 	inode->i_state |= I_SYNC;
 	lustre_wbc_attach_and_unlock_inode(&wbc, inode);
+	if (lnode) {
+		kfree(lnode);
+		lnode = NULL;
+	}
+
 
 	write_chunk = writeback_chunk_size(wb, work);
 	wbc.nr_to_write = write_chunk;

@@ -1458,7 +1458,7 @@ static inline void client_adjust_max_dirty(struct client_obd *cli)
 					   1 << (20 - PAGE_SHIFT));
 
 	/* ych: temporary experiment    */
-        //cli->cl_dirty_max_pages = (64UL * 1024 * 1024 * 1024) >> PAGE_SHIFT;
+        cli->cl_dirty_max_pages = (256UL * 1024 * 1024 * 1024) >> PAGE_SHIFT;
         //cli->cl_dirty_max_pages = 917504UL;
         /* ych  */
 }
