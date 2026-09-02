@@ -31,7 +31,7 @@
 #include "internal.h"
 #include <linux/lflist.h>
 
-#include "../include/lockfree_list.h"
+#include <linux/lockfree_list.h>
 #include "../include/calclock.h"
 #include "../llite/llite_internal.h"
 extern bool trylock_super(struct super_block *sb); //Kiet
@@ -157,7 +157,8 @@ static bool inode_io_list_move_locked(struct inode *inode,
 
 	list_del_init(&inode->i_io_list);
 	ktget(&localclock[0]);
-	InsertInode(&wb->lock_free_dirty, &inode->i_io_list, true);
+	//InsertInode(&wb->lock_free_dirty, &inode->i_io_list, true);
+	InsertInode(&wb->lock_free_dirty, inode, true);
 	ktget(&localclock[1]);
 	ktput(localclock, InsertInode);
 
@@ -3229,7 +3230,7 @@ void __lustre_mark_inode_dirty(struct inode *inode, int flags)
 			/*
 			 * LNode is now owned by lock-free list.
 			 */
-			lnode = NULL;
+			//lnode = NULL;
 
 			//wakeup_bdi = inode_io_list_move_locked(inode, wb,
 			//				       dirty_list);
