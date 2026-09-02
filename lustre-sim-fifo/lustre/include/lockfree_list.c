@@ -43,11 +43,11 @@ static bool TryMarkNode(struct LNode *lock)
 
 static void rlock_node_rcu_free(struct rcu_head *head)
 {
-	struct LNode *node = container_of(head, struct LNode, rcu);
+//	struct LNode *node = container_of(head, struct LNode, rcu);
 
 //	printk("[%s] start! from %ps\n", __func__, __builtin_return_address(0));
 //	printk("current->comm = %s\n", current->comm);
-	kfree(node);
+//	kfree(node);
 }
 
 static void DeleteNode(struct LNode* lock)

@@ -279,6 +279,7 @@ static int __init lustre_init(void)
 	int rc;
 	unsigned long lustre_inode_cache_flags;
 
+	printk("[%s]: 1\n", __func__);
 	pr_info("Insert module \n");
 
 	init_lflist_head(&lf_b_more_io);

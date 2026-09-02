@@ -33,6 +33,7 @@
 
 #include "../include/lockfree_list.h"
 #include "../include/calclock.h"
+#include "../llite/llite_internal.h"
 extern bool trylock_super(struct super_block *sb); //Kiet
 extern void inode_add_lru(struct inode *inode);
 extern long get_nr_dirty_inodes(void);
@@ -1822,58 +1823,57 @@ static void requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 	}
 }
 
-static bool lustre_requeue_inode_prealloc(struct inode *inode, struct bdi_writeback *wb,
-			  struct writeback_control *wbc, struct LNode *lnode)
-{
-	if (inode->i_state & I_FREEING)
-		return false;
+//static bool lustre_requeue_inode_prealloc(struct inode *inode, struct bdi_writeback *wb,
+//			  struct writeback_control *wbc, struct LNode *lnode)
+//{
+//	if (inode->i_state & I_FREEING)
+//		return false;
+//
+//	/*
+//	 * Sync livelock prevention. Each inode is tagged and synced in one
+//	 * shot. If still dirty, it will be redirty_tail()'ed below.  Update
+//	 * the dirty time to prevent enqueue and sync it again.
+//	 */
+//	if ((inode->i_state & I_DIRTY) &&
+//	    (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages))
+//		inode->dirtied_when = jiffies;
+//
+//	if (wbc->pages_skipped) {
+//		/*
+//		 * writeback is not making progress due to locked
+//		 * buffers. Skip this inode for now.
+//		 */
+//		redirty_tail_locked_prealloc(inode, wb, lnode);
+//		return true;
+//	}
+//
+//	if (mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY)) {
+//		/*
+//		 * We didn't write back all the pages.  nfs_writepages()
+//		 * sometimes bales out without doing anything.
+//		 */
+//		redirty_tail_locked_prealloc(inode, wb, lnode);
+//		return true;
+//	} else if (inode->i_state & I_DIRTY) {
+//		/*
+//		 * Filesystems can dirty the inode during writeback operations,
+//		 * such as delayed allocation during submission or metadata
+//		 * updates after data IO completion.
+//		 */
+//		redirty_tail_locked_prealloc(inode, wb, lnode);
+//		return true;
+//	} else if (inode->i_state & I_DIRTY_TIME) {
+//		inode->dirtied_when = jiffies;
+//		redirty_tail_locked_prealloc(inode, wb, lnode);
+//		inode->i_state &= ~I_SYNC_QUEUED;
+//		return true;
+//	} else {
+//		/* The inode is clean. Remove from writeback lists. */
+//		lustre_inode_cgwb_move_to_attached(inode, wb);
+//		return false;
+//	}
+//}
 
-	/*
-	 * Sync livelock prevention. Each inode is tagged and synced in one
-	 * shot. If still dirty, it will be redirty_tail()'ed below.  Update
-	 * the dirty time to prevent enqueue and sync it again.
-	 */
-	if ((inode->i_state & I_DIRTY) &&
-	    (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages))
-		inode->dirtied_when = jiffies;
-
-	if (wbc->pages_skipped) {
-		/*
-		 * writeback is not making progress due to locked
-		 * buffers. Skip this inode for now.
-		 */
-		redirty_tail_locked_prealloc(inode, wb, lnode);
-		return true;
-	}
-
-	if (mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY)) {
-		/*
-		 * We didn't write back all the pages.  nfs_writepages()
-		 * sometimes bales out without doing anything.
-		 */
-		redirty_tail_locked_prealloc(inode, wb, lnode);
-		return true;
-	} else if (inode->i_state & I_DIRTY) {
-		/*
-		 * Filesystems can dirty the inode during writeback operations,
-		 * such as delayed allocation during submission or metadata
-		 * updates after data IO completion.
-		 */
-		redirty_tail_locked_prealloc(inode, wb, lnode);
-		return true;
-	} else if (inode->i_state & I_DIRTY_TIME) {
-		inode->dirtied_when = jiffies;
-		redirty_tail_locked_prealloc(inode, wb, lnode);
-		inode->i_state &= ~I_SYNC_QUEUED;
-		return true;
-	} else {
-		/* The inode is clean. Remove from writeback lists. */
-		lustre_inode_cgwb_move_to_attached(inode, wb);
-		return false;
-	}
-}
-
-# if 0
 static void lustre_requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 			  struct writeback_control *wbc)
 {
@@ -1920,7 +1920,6 @@ static void lustre_requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 		lustre_inode_cgwb_move_to_attached(inode, wb);
 	}
 }
-# endif
 
 int lustre_do_writepages(struct address_space *mapping, struct writeback_control *wbc);
 
@@ -2312,17 +2311,21 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 	* kind writeout is handled by the freer.
 	*/
 
-	lnode = AllocInodeNode(&inode->i_io_list);
-	if (unlikely(!lnode)) {
-		pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
-				__func__, inode);
-		return wrote;
-	}
+//	lnode = AllocInodeNode(&inode->i_io_list);
+//	if (unlikely(!lnode)) {
+//		pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+//				__func__, inode);
+//		return wrote;
+//	}
+	lnode = ll_i2info(inode)->lli_lnode;
+	if (unlikely(!lnode))
+		printk(KERN_ERR "[%s] error!!\n", __func__);
+
 	spin_lock(&inode->i_lock);
 	if (inode->i_state & (I_NEW | I_FREEING | I_WILL_FREE)) {
 		redirty_tail_locked_prealloc(inode, wb, lnode);
 		//redirty_tail_locked(inode, wb);
-		lnode = NULL;
+		//lnode = NULL;
 		spin_unlock(&inode->i_lock);
 		return wrote;
 	}
@@ -2345,10 +2348,10 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 	// }
 	inode->i_state |= I_SYNC;
 	lustre_wbc_attach_and_unlock_inode(&wbc, inode);
-	if (lnode) {
-		kfree(lnode);
-		lnode = NULL;
-	}
+//	if (lnode) {
+//		kfree(lnode);
+//		lnode = NULL;
+//	}
 
 
 	write_chunk = writeback_chunk_size(wb, work);
@@ -2373,12 +2376,12 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 	* Requeue @inode if still dirty.  Be careful as @inode may
 	* have been switched to another wb in the meantime.
 	*/
-	lnode = AllocInodeNode(&inode->i_io_list);
-	if (unlikely(!lnode)) {
-		pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
-				__func__, inode);
-		return wrote;
-	}
+//	lnode = AllocInodeNode(&inode->i_io_list);
+//	if (unlikely(!lnode)) {
+//		pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+//				__func__, inode);
+//		return wrote;
+//	}
 
 	spin_lock(&inode->i_lock);
 
@@ -2386,9 +2389,9 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 		wrote++;
 
 	ktget(&localclock[0]);
-	if (lustre_requeue_inode_prealloc(inode, wb, &wbc, lnode))
-		lnode = NULL;
-	//lustre_requeue_inode(inode, wb, &wbc);
+//	if (lustre_requeue_inode_prealloc(inode, wb, &wbc, lnode))
+//		lnode = NULL;
+	lustre_requeue_inode(inode, wb, &wbc);
 	ktget(&localclock[1]);
 	ktput(localclock, lustre_requeue_inode);
 
@@ -2396,10 +2399,10 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 
 	spin_unlock(&inode->i_lock);
 
-	if (lnode) {
-		kfree(lnode);
-		lnode = NULL;
-	}
+//	if (lnode) {
+//		kfree(lnode);
+//		lnode = NULL;
+//	}
 
 	return wrote;
 }
@@ -2454,12 +2457,16 @@ static long __lustre_writeback_single(struct bdi_writeback *wb, struct inode *in
 		*/
 		pr_info("Failed to lock super block\n");
 
-		lnode = AllocInodeNode(&inode->i_io_list);
-		if (unlikely(!lnode)) {
-			pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
-					__func__, inode);
-			return wrote;
-		}
+//		lnode = AllocInodeNode(&inode->i_io_list);
+//		if (unlikely(!lnode)) {
+//			pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n",
+//					__func__, inode);
+//			return wrote;
+//		}
+		lnode = ll_i2info(inode)->lli_lnode;
+		if (unlikely(!lnode))
+			printk(KERN_ERR "[%s] error\n", __func__);
+
 		spin_lock(&inode->i_lock);
 		redirty_tail_locked_prealloc(inode, wb, lnode);
 		spin_unlock(&inode->i_lock);
@@ -3144,11 +3151,15 @@ void __lustre_mark_inode_dirty(struct inode *inode, int flags)
 	if (unlikely(block_dump))
 		block_dump___mark_inode_dirty(inode);
 
-	lnode = AllocInodeNode(&inode->i_io_list);
-	if (unlikely(!lnode)) {
-		pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n", __func__, inode);
-		return;
-	}
+//	lnode = AllocInodeNode(&inode->i_io_list);
+//	if (unlikely(!lnode)) {
+//		pr_err_ratelimited("[%s] failed to allocate LNode for inode %p\n", __func__, inode);
+//		return;
+//	}
+
+	lnode = ll_i2info(inode)->lli_lnode;
+	if (unlikely(!lnode))
+		printk(KERN_ERR "[%s]: error\n", __func__);
 
 	spin_lock(&inode->i_lock);
 //	printk("[%s] CPU#%d (%s:%d) Lock success\n",
@@ -3244,11 +3255,11 @@ out_unlock:
 out_unlock_inode:
 	spin_unlock(&inode->i_lock);
 
-	/*
-	 * Preallocated node wasn't inserted.
-	 */
-	if (lnode)
-		kfree(lnode);
+//	/*
+//	 * Preallocated node wasn't inserted.
+//	 */
+//	if (lnode)
+//		kfree(lnode);
 }
 EXPORT_SYMBOL(__lustre_mark_inode_dirty);
 
