@@ -143,6 +143,8 @@ struct ll_inode_info {
 	struct mutex			lli_och_mutex;
 
 	struct inode			lli_vfs_inode;
+	struct LNode			*lli_lnode;
+
 
 	/* the most recent timestamps obtained from mds */
 	s64				lli_atime;
