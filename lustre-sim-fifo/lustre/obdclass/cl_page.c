@@ -44,6 +44,8 @@
 #include <cl_object.h>
 #include "cl_internal.h"
 
+#include "../include/calclock.h"
+
 static void __cl_page_delete(const struct lu_env *env, struct cl_page *pg);
 static DEFINE_MUTEX(cl_page_kmem_mutex);
 
@@ -196,11 +198,15 @@ static void cl_page_free(const struct lu_env *env, struct cl_page *cp,
 	EXIT;
 }
 
+KTDEF(slab__cl_page_alloc);
+EXPORT_SYMBOL(slab__cl_page_alloc_clock);
+
 static struct cl_page *__cl_page_alloc(struct cl_object *o)
 {
 	int i = 0;
 	struct cl_page *cl_page = NULL;
 	unsigned short bufsize = cl_object_header(o)->coh_page_bufsize;
+	ktime_t localclock[2];
 
 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_PAGE_ALLOC))
 		return NULL;
@@ -212,8 +218,11 @@ check:
 	for ( ; i < ARRAY_SIZE(cl_page_kmem_array); i++) {
 		if (smp_load_acquire(&cl_page_kmem_size_array[i])
 		    == bufsize) {
+			ktget(&localclock[0]);
 			OBD_SLAB_ALLOC_GFP(cl_page, cl_page_kmem_array[i],
 					   bufsize, GFP_NOFS);
+			ktget(&localclock[1]);
+			ktput(localclock, slab__cl_page_alloc);
 			if (cl_page)
 				cl_page->cp_kmem_index = i;
 			return cl_page;
@@ -252,16 +261,25 @@ check:
 	return cl_page;
 }
 
+KTDEF(__cl_page_alloc);
+EXPORT_SYMBOL(__cl_page_alloc_clock);
+KTDEF(coo_page_init);
+EXPORT_SYMBOL(coo_page_init_clock);
+
 struct cl_page *cl_page_alloc(const struct lu_env *env, struct cl_object *o,
 			      pgoff_t ind, struct page *vmpage,
 			      enum cl_page_type type)
 {
 	struct cl_page *cl_page;
 	struct cl_object *head;
+	ktime_t localclock[2];
 
 	ENTRY;
 
+	ktget(&localclock[0]);
 	cl_page = __cl_page_alloc(o);
+	ktget(&localclock[1]);
+	ktput(localclock, __cl_page_alloc);
 	if (cl_page != NULL) {
 		int result = 0;
 
@@ -293,8 +311,11 @@ struct cl_page *cl_page_alloc(const struct lu_env *env, struct cl_object *o,
 		cl_page->cp_page_index = ind;
 		cl_object_for_each(o, head) {
 			if (o->co_ops->coo_page_init != NULL) {
+				ktget(&localclock[0]);
 				result = o->co_ops->coo_page_init(env, o,
 							cl_page, ind);
+				ktget(&localclock[1]);
+				ktput(localclock, coo_page_init);
 				if (result != 0) {
 					__cl_page_delete(env, cl_page);
 					cl_page_free(env, cl_page, NULL);
@@ -314,6 +335,15 @@ struct cl_page *cl_page_alloc(const struct lu_env *env, struct cl_object *o,
 	RETURN(cl_page);
 }
 
+KTDEF(might_sleep);
+EXPORT_SYMBOL(might_sleep_clock);
+KTDEF(cs_page_inc);
+EXPORT_SYMBOL(cs_page_inc_clock);
+KTDEF(cl_vmpage_page);
+EXPORT_SYMBOL(cl_vmpage_page_clock);
+KTDEF(cl_page_alloc);
+EXPORT_SYMBOL(cl_page_alloc_clock);
+
 /**
  * Returns a cl_page with index \a idx at the object \a o, and associated with
  * the VM page \a vmpage.
@@ -332,14 +362,21 @@ struct cl_page *cl_page_find(const struct lu_env *env,
 {
 	struct cl_page          *page = NULL;
 	struct cl_object_header *hdr;
+	ktime_t	localclock[2];
 
 	LASSERT(type == CPT_CACHEABLE || type == CPT_TRANSIENT);
-	might_sleep();
+	ktget(&localclock[0]);
+	//might_sleep();
+	ktget(&localclock[1]);
+	ktput(localclock, might_sleep);
 
 	ENTRY;
 
 	hdr = cl_object_header(o);
+	ktget(&localclock[0]);
 	cs_page_inc(o, CS_lookup);
+	ktget(&localclock[1]);
+	ktput(localclock, cs_page_inc);
 
         CDEBUG(D_PAGE, "%lu@"DFID" %p %lx %d\n",
                idx, PFID(&hdr->coh_lu.loh_fid), vmpage, vmpage->private, type);
@@ -357,7 +394,10 @@ struct cl_page *cl_page_find(const struct lu_env *env,
                  *     - "o" cannot be destroyed while current thread holds a
                  *       reference on it.
                  */
+		ktget(&localclock[0]);
                 page = cl_vmpage_page(vmpage, o);
+		ktget(&localclock[1]);
+		ktput(localclock, cl_vmpage_page);
 		if (page != NULL) {
 			cs_page_inc(o, CS_hit);
 			RETURN(page);
@@ -365,7 +405,10 @@ struct cl_page *cl_page_find(const struct lu_env *env,
         }
 
         /* allocate and initialize cl_page */
+	ktget(&localclock[0]);
         page = cl_page_alloc(env, o, idx, vmpage, type);
+	ktget(&localclock[1]);
+	ktput(localclock, cl_page_alloc);
 	RETURN(page);
 }
 EXPORT_SYMBOL(cl_page_find);

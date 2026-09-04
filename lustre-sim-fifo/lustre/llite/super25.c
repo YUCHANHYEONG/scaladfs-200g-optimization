@@ -493,6 +493,7 @@ KTDEC(cl_object_attr_lock);
 KTDEC(cl_loi_list_lock);
 KTDEC(osc_enter_cache);
 KTDEC(ptlrpc_prep_set);
+KTDEC(slab_ptlrpc_prep_set);
 KTDEC(ych_cl_loi_list_lock);
 KTDEC(ych_osc_enter_cache_try_1);
 KTDEC(application_unlock_and_unplug);
@@ -525,6 +526,13 @@ KTDEC(grab_cache_page_nowait);
 KTDEC(find_get_entry);
 KTDEC(page_cache_alloc);
 KTDEC(cl_page_find);
+KTDEC(might_sleep);
+KTDEC(cs_page_inc);
+KTDEC(cl_vmpage_page);
+KTDEC(cl_page_alloc);
+KTDEC(__cl_page_alloc);
+KTDEC(slab__cl_page_alloc);
+KTDEC(coo_page_init);
 //KTDEC(sptlrpc_import_check_ctx);
 
 KTDEC(ll_writepages);
@@ -610,6 +618,7 @@ KTDEC(wait_woken);
 
 KTDEC(osc_extent_find);
 KTDEC(osc_extent_alloc);
+KTDEC(slab_osc_extent_alloc);
 KTDEC(ldlm_lock_get);
 KTDEC(osc_extent_search);
 
@@ -902,6 +911,13 @@ static void __exit lustre_exit(void)
 	ktprint(11, __add_to_page_cache_locked);
 	ktprint(11, lru_cache_add);
 	ktprint(9, cl_page_find);
+	ktprint(10, might_sleep);
+	ktprint(10, cs_page_inc);
+	ktprint(10, cl_vmpage_page);
+	ktprint(10, cl_page_alloc);
+	ktprint(11, __cl_page_alloc);
+	ktprint(12, slab__cl_page_alloc);
+	ktprint(11, coo_page_init);
 	ktprint(8, iov_iter_copy_from_user_atomic);
 	ktprint(8, balance_dirty_pages_ratelimited);
 	ktprint(9, lustre_wb_do_writeback);
@@ -955,6 +971,7 @@ static void __exit lustre_exit(void)
 	ktprint(10, osc_queue_async_io);
 	ktprint(11, osc_extent_find);
 	ktprint(12, osc_extent_alloc);
+	ktprint(13, slab_osc_extent_alloc);
 	ktprint(12, ldlm_lock_get);
 	ktprint(12, osc_extent_search);
 	ktprint(11, osc_enter_cache_try);
@@ -963,6 +980,7 @@ static void __exit lustre_exit(void)
 	ktprint(11, osc_extent_release);
 	ktprint(11, osc_enter_cache);
 	ktprint(12, ptlrpc_prep_set);
+	ktprint(13, slab_ptlrpc_prep_set);
 	ktprint(12, ych_cl_loi_list_lock);
 	ktprint(12, ych_osc_enter_cache_try_1);
 	ktprint(12, application_unlock_and_unplug);

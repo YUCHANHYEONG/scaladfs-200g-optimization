@@ -320,11 +320,17 @@ static void osc_extent_state_set(struct osc_extent *ext, int state)
 	wake_up(&ext->oe_waitq);
 }
 
+KTDEF(slab_osc_extent_alloc);
+EXPORT_SYMBOL(slab_osc_extent_alloc_clock);
 static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
 {
 	struct osc_extent *ext;
+	ktime_t localclock[2];
 
+	ktget(&localclock[0]);
 	OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
+	ktget(&localclock[1]);
+	ktput(localclock, slab_osc_extent_alloc);
 	if (ext == NULL)
 		return NULL;
 

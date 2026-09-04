@@ -1258,6 +1258,8 @@ struct ptlrpc_request *ptlrpc_request_alloc_pack(struct obd_import *imp,
 }
 EXPORT_SYMBOL(ptlrpc_request_alloc_pack);
 
+KTDEF(slab_ptlrpc_prep_set);
+EXPORT_SYMBOL(slab_ptlrpc_prep_set_clock);
 /**
  * Allocate and initialize new request set structure on the current CPT.
  * Returns a pointer to the newly allocated set structure or NULL on error.
@@ -1266,10 +1268,15 @@ struct ptlrpc_request_set *ptlrpc_prep_set(void)
 {
 	struct ptlrpc_request_set *set;
 	int cpt;
+	ktime_t localclock[2];
 
 	ENTRY;
 	cpt = cfs_cpt_current(cfs_cpt_tab, 0);
+
+	ktget(&localclock[0]);
 	OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
+	ktget(&localclock[1]);
+	ktput(localclock, slab_ptlrpc_prep_set);
 	if (!set)
 		RETURN(NULL);
 	atomic_set(&set->set_refcount, 1);
