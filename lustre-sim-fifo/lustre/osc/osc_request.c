@@ -4503,10 +4503,12 @@ out_kmem:
 
 static void __exit osc_exit(void)
 {
+
 	class_unregister_type(LUSTRE_OSC_NAME);
 	ptlrpc_free_rq_pool(osc_rq_pool);
 	osc_stop_grant_work();
 	unregister_shrinker(&osc_cache_shrinker);
+	osc_extent_pool_fini();
 	lu_kmem_fini(osc_caches);
 }
 

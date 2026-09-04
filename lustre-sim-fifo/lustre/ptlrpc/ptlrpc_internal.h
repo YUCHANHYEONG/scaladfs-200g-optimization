@@ -55,6 +55,8 @@ extern struct ptlrpc_nrs_pol_conf nrs_conf_trr;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_tbf;
 #endif /* HAVE_SERVER_SUPPORT */
 
+void ptlrpc_reqset_pool_release(struct ptlrpc_request_set *set);
+
 /**
  * \addtogoup nrs
  * @{
@@ -346,9 +348,15 @@ void nodemap_mod_exit(void);
 
 static inline void ptlrpc_reqset_put(struct ptlrpc_request_set *set)
 {
-	if (atomic_dec_and_test(&set->set_refcount))
-		OBD_FREE_PTR(set);
+	        if (atomic_dec_and_test(&set->set_refcount))
+			                ptlrpc_reqset_pool_release(set);
 }
+
+//static inline void ptlrpc_reqset_put(struct ptlrpc_request_set *set)
+//{
+//	if (atomic_dec_and_test(&set->set_refcount))
+//		OBD_FREE_PTR(set);
+//}
 
 /** initialise ptlrpc common fields */
 static inline void ptlrpc_req_comm_init(struct ptlrpc_request *req)

@@ -46,6 +46,179 @@
 
 #include "ptlrpc_internal.h"
 #include "../include/calclock.h"
+#include <linux/percpu.h>
+#include <linux/cpu.h>
+
+/*
+ * Temporary pre-allocation pool for ptlrpc_request_set.
+ *
+ * TEST ONLY:
+ *   - used to check whether OBD_CPT_ALLOC() is a bottleneck
+ *   - each CPU has its own freelist
+ *   - on a miss, TEST_SET_POOL_REFILL objects are allocated at once
+ */
+//#define TEST_SET_POOL_MAX       256
+#define TEST_SET_POOL_MAX       1000000
+//#define TEST_SET_POOL_REFILL     64
+#define TEST_SET_POOL_REFILL    1000000
+
+struct test_set_pool_cpu {
+        spinlock_t              lock;
+        struct list_head        free_list;
+        unsigned int            nr;
+};
+
+static DEFINE_PER_CPU(struct test_set_pool_cpu, test_set_pool);
+
+static DEFINE_MUTEX(test_set_pool_init_mutex);
+static bool test_set_pool_initialized;
+
+//static atomic64_t test_set_pool_hit  = ATOMIC64_INIT(0);
+//static atomic64_t test_set_pool_miss = ATOMIC64_INIT(0);
+
+
+static void test_set_pool_init_once(void)
+{
+        int cpu;
+
+        if (likely(READ_ONCE(test_set_pool_initialized)))
+                return;
+
+        mutex_lock(&test_set_pool_init_mutex);
+
+        if (!READ_ONCE(test_set_pool_initialized)) {
+                for_each_possible_cpu(cpu) {
+                        struct test_set_pool_cpu *pool;
+
+                        pool = per_cpu_ptr(&test_set_pool, cpu);
+
+                        spin_lock_init(&pool->lock);
+                        INIT_LIST_HEAD(&pool->free_list);
+                        pool->nr = 0;
+                }
+
+                smp_wmb();
+                WRITE_ONCE(test_set_pool_initialized, true);
+        }
+
+        mutex_unlock(&test_set_pool_init_mutex);
+}
+
+static struct ptlrpc_request_set *test_set_pool_get(void)
+{
+        struct test_set_pool_cpu *pool;
+        struct ptlrpc_request_set *set = NULL;
+        struct list_head *node;
+        unsigned long flags;
+
+        preempt_disable();
+
+        pool = this_cpu_ptr(&test_set_pool);
+
+        spin_lock_irqsave(&pool->lock, flags);
+
+        if (!list_empty(&pool->free_list)) {
+                node = pool->free_list.next;
+                list_del(node);
+                pool->nr--;
+
+                /*
+                 * The object itself is used as a temporary list_head
+                 * while it is in the pool.
+                 */
+                set = (struct ptlrpc_request_set *)node;
+        }
+
+        spin_unlock_irqrestore(&pool->lock, flags);
+
+        preempt_enable();
+
+//        if (set)
+//                atomic64_inc(&test_set_pool_hit);
+//        else
+//                atomic64_inc(&test_set_pool_miss);
+
+        return set;
+}
+
+static bool test_set_pool_put(struct ptlrpc_request_set *set)
+{
+        struct test_set_pool_cpu *pool;
+        unsigned long flags;
+        bool inserted = false;
+
+        preempt_disable();
+
+        pool = this_cpu_ptr(&test_set_pool);
+
+        spin_lock_irqsave(&pool->lock, flags);
+
+        if (pool->nr < TEST_SET_POOL_MAX) {
+                /*
+                 * set is dead at this point.
+                 * Reuse the beginning of the object as list_head.
+                 */
+                list_add((struct list_head *)set,
+                         &pool->free_list);
+
+                pool->nr++;
+                inserted = true;
+        }
+
+        spin_unlock_irqrestore(&pool->lock, flags);
+
+        preempt_enable();
+
+        return inserted;
+}
+
+static struct ptlrpc_request_set *
+test_set_pool_refill(int cpt)
+{
+        struct ptlrpc_request_set *set = NULL;
+        struct ptlrpc_request_set *tmp;
+        int i;
+
+	printk("[%s]: start\n", __func__);
+        for (i = 0; i < TEST_SET_POOL_REFILL; i++) {
+                OBD_CPT_ALLOC(tmp, cfs_cpt_tab, cpt, sizeof(*tmp));
+
+                if (!tmp)
+                        break;
+
+                /*
+                 * The first object is immediately returned to caller.
+                 * Remaining objects are stored in the pool.
+                 */
+                if (!set) {
+                        set = tmp;
+                        continue;
+                }
+
+                if (!test_set_pool_put(tmp))
+                        OBD_FREE_PTR(tmp);
+        }
+
+        return set;
+}
+
+void ptlrpc_reqset_pool_release(struct ptlrpc_request_set *set)
+{
+        /*
+         * Normally test_set_pool_init_once() has already been called
+         * from ptlrpc_prep_set().
+         *
+         * Just in case this object came from another allocation path,
+         * fall back to the original free path.
+         */
+        if (!READ_ONCE(test_set_pool_initialized)) {
+                OBD_FREE_PTR(set);
+                return;
+        }
+
+        if (!test_set_pool_put(set))
+                OBD_FREE_PTR(set);
+}
 
 static void ptlrpc_prep_bulk_page_pin(struct ptlrpc_bulk_desc *desc,
 				      struct page *page, int pageoffset,
@@ -1266,34 +1439,88 @@ EXPORT_SYMBOL(slab_ptlrpc_prep_set_clock);
  */
 struct ptlrpc_request_set *ptlrpc_prep_set(void)
 {
-	struct ptlrpc_request_set *set;
-	int cpt;
-	ktime_t localclock[2];
+        struct ptlrpc_request_set *set;
+        int cpt;
+        ktime_t localclock[2];
 
-	ENTRY;
-	cpt = cfs_cpt_current(cfs_cpt_tab, 0);
+        ENTRY;
 
-	ktget(&localclock[0]);
-	OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
-	ktget(&localclock[1]);
-	ktput(localclock, slab_ptlrpc_prep_set);
-	if (!set)
-		RETURN(NULL);
-	atomic_set(&set->set_refcount, 1);
-	INIT_LIST_HEAD(&set->set_requests);
-	init_waitqueue_head(&set->set_waitq);
-	atomic_set(&set->set_new_count, 0);
-	atomic_set(&set->set_remaining, 0);
-	spin_lock_init(&set->set_new_req_lock);
-	INIT_LIST_HEAD(&set->set_new_requests);
-	set->set_max_inflight = UINT_MAX;
-	// set->set_max_inflight = 1;
-	set->set_producer     = NULL;
-	set->set_producer_arg = NULL;
-	set->set_rc           = 0;
+        test_set_pool_init_once();
 
-	RETURN(set);
+        cpt = cfs_cpt_current(cfs_cpt_tab, 0);
+
+        ktget(&localclock[0]);
+
+        set = test_set_pool_get();
+
+        ktget(&localclock[1]);
+        ktput(localclock, slab_ptlrpc_prep_set);
+
+        if (!set)
+                set = test_set_pool_refill(cpt);
+
+
+        if (!set)
+                RETURN(NULL);
+
+        /*
+         * VERY IMPORTANT:
+         *
+         * A pooled set contains values from its previous lifetime.
+         * Clear it before normal initialization.
+         */
+        memset(set, 0, sizeof(*set));
+
+        atomic_set(&set->set_refcount, 1);
+
+        INIT_LIST_HEAD(&set->set_requests);
+        init_waitqueue_head(&set->set_waitq);
+
+        atomic_set(&set->set_new_count, 0);
+        atomic_set(&set->set_remaining, 0);
+
+        spin_lock_init(&set->set_new_req_lock);
+        INIT_LIST_HEAD(&set->set_new_requests);
+
+        set->set_max_inflight = UINT_MAX;
+
+        set->set_producer     = NULL;
+        set->set_producer_arg = NULL;
+        set->set_rc           = 0;
+
+        RETURN(set);
 }
+
+//struct ptlrpc_request_set *ptlrpc_prep_set(void)
+//{
+//	struct ptlrpc_request_set *set;
+//	int cpt;
+//	ktime_t localclock[2];
+//
+//	ENTRY;
+//	cpt = cfs_cpt_current(cfs_cpt_tab, 0);
+//
+//	ktget(&localclock[0]);
+//	OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
+//	ktget(&localclock[1]);
+//	ktput(localclock, slab_ptlrpc_prep_set);
+//	if (!set)
+//		RETURN(NULL);
+//	atomic_set(&set->set_refcount, 1);
+//	INIT_LIST_HEAD(&set->set_requests);
+//	init_waitqueue_head(&set->set_waitq);
+//	atomic_set(&set->set_new_count, 0);
+//	atomic_set(&set->set_remaining, 0);
+//	spin_lock_init(&set->set_new_req_lock);
+//	INIT_LIST_HEAD(&set->set_new_requests);
+//	set->set_max_inflight = UINT_MAX;
+//	// set->set_max_inflight = 1;
+//	set->set_producer     = NULL;
+//	set->set_producer_arg = NULL;
+//	set->set_rc           = 0;
+//
+//	RETURN(set);
+//}
 EXPORT_SYMBOL(ptlrpc_prep_set);
 
 struct ptlrpc_request_set *application_prep_set(void)

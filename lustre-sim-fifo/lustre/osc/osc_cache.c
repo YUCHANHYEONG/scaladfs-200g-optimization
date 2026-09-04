@@ -43,6 +43,213 @@
 
 #include "osc_internal.h"
 
+#include <linux/percpu.h>
+#include <linux/cpu.h>
+
+#define TEST_EXTENT_POOL_MAX       1024
+#define TEST_EXTENT_POOL_REFILL      64
+
+struct test_extent_pool_cpu {
+        spinlock_t              lock;
+        struct list_head        free_list;
+        unsigned int            nr;
+};
+
+static DEFINE_PER_CPU(struct test_extent_pool_cpu, test_extent_pool);
+
+static DEFINE_MUTEX(test_extent_pool_init_mutex);
+static bool test_extent_pool_initialized;
+static bool test_extent_pool_stopping;
+
+static void test_extent_pool_init_once(void)
+{
+        int cpu;
+
+        if (likely(READ_ONCE(test_extent_pool_initialized)))
+                return;
+
+        mutex_lock(&test_extent_pool_init_mutex);
+
+        if (!READ_ONCE(test_extent_pool_initialized)) {
+                for_each_possible_cpu(cpu) {
+                        struct test_extent_pool_cpu *pool;
+
+                        pool = per_cpu_ptr(&test_extent_pool, cpu);
+
+                        spin_lock_init(&pool->lock);
+                        INIT_LIST_HEAD(&pool->free_list);
+                        pool->nr = 0;
+                }
+
+                WRITE_ONCE(test_extent_pool_stopping, false);
+                smp_wmb();
+                WRITE_ONCE(test_extent_pool_initialized, true);
+        }
+
+        mutex_unlock(&test_extent_pool_init_mutex);
+}
+
+static struct osc_extent *test_extent_pool_get(void)
+{
+        struct test_extent_pool_cpu *pool;
+        struct osc_extent *ext = NULL;
+        unsigned long flags;
+
+        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
+                return NULL;
+
+        preempt_disable();
+
+        pool = this_cpu_ptr(&test_extent_pool);
+
+        spin_lock_irqsave(&pool->lock, flags);
+
+        if (!list_empty(&pool->free_list)) {
+                ext = list_first_entry(&pool->free_list,
+                                       struct osc_extent,
+                                       oe_link);
+
+                list_del_init(&ext->oe_link);
+
+                LASSERT(pool->nr > 0);
+                pool->nr--;
+        }
+
+        spin_unlock_irqrestore(&pool->lock, flags);
+
+        preempt_enable();
+
+        return ext;
+}
+
+static bool test_extent_pool_put(struct osc_extent *ext)
+{
+        struct test_extent_pool_cpu *pool;
+        unsigned long flags;
+        bool inserted = false;
+
+        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
+                return false;
+
+        /*
+         * The normal final-release path guarantees that oe_link is detached
+         * before the osc_extent is eligible for reuse.  Reuse oe_link as the
+         * pool's freelist node; never cast the beginning of struct osc_extent
+         * to struct list_head.
+         */
+        LASSERT(list_empty(&ext->oe_link));
+
+        preempt_disable();
+
+        pool = this_cpu_ptr(&test_extent_pool);
+
+        spin_lock_irqsave(&pool->lock, flags);
+
+        /*
+         * Check stopping again while holding the pool lock so that a concurrent
+         * pool drain cannot race with insertion.
+         */
+        if (!READ_ONCE(test_extent_pool_stopping) &&
+            pool->nr < TEST_EXTENT_POOL_MAX) {
+                list_add(&ext->oe_link, &pool->free_list);
+                pool->nr++;
+                inserted = true;
+        }
+
+        spin_unlock_irqrestore(&pool->lock, flags);
+
+        preempt_enable();
+
+        return inserted;
+}
+
+static struct osc_extent *test_extent_pool_refill(void)
+{
+        struct osc_extent *ext = NULL;
+        struct osc_extent *tmp;
+        int i;
+
+        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
+                return NULL;
+
+        for (i = 0; i < TEST_EXTENT_POOL_REFILL; i++) {
+                tmp = NULL;
+
+                OBD_SLAB_ALLOC_PTR_GFP(tmp,
+                                       osc_extent_kmem,
+                                       GFP_NOFS);
+
+                if (!tmp)
+                        break;
+
+                /* oe_link is the pool node, so make it a valid empty list. */
+                INIT_LIST_HEAD(&tmp->oe_link);
+
+                if (!ext) {
+                        ext = tmp;
+                        continue;
+                }
+
+                if (!test_extent_pool_put(tmp))
+                        OBD_SLAB_FREE_PTR(tmp, osc_extent_kmem);
+        }
+
+        return ext;
+}
+
+/*
+ * Drain every object retained by the temporary per-CPU extent pool.
+ *
+ * This MUST run after new OSC users have been stopped and BEFORE
+ * lu_kmem_fini(osc_caches) destroys osc_extent_kmem.
+ */
+void osc_extent_pool_fini(void)
+{
+        int cpu;
+        unsigned long total = 0;
+
+        if (!READ_ONCE(test_extent_pool_initialized))
+                return;
+
+        WRITE_ONCE(test_extent_pool_stopping, true);
+        smp_mb();
+
+        for_each_possible_cpu(cpu) {
+                struct test_extent_pool_cpu *pool;
+                LIST_HEAD(local_list);
+                unsigned long flags;
+                unsigned int nr;
+
+                pool = per_cpu_ptr(&test_extent_pool, cpu);
+
+                spin_lock_irqsave(&pool->lock, flags);
+
+                nr = pool->nr;
+                list_splice_init(&pool->free_list, &local_list);
+                pool->nr = 0;
+
+                spin_unlock_irqrestore(&pool->lock, flags);
+
+                while (!list_empty(&local_list)) {
+                        struct osc_extent *ext;
+
+                        ext = list_first_entry(&local_list,
+                                               struct osc_extent,
+                                               oe_link);
+                        list_del_init(&ext->oe_link);
+                        OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
+                        total++;
+                }
+
+                if (nr != 0)
+                        pr_info("[extent_pool] CPU %d: drained %u objects\n",
+                                cpu, nr);
+        }
+
+}
+
+
+
 static int extent_debug; /* set it to be true for more debug */
 
 static void osc_update_pending(struct osc_object *obj, int cmd, int delta);
@@ -324,29 +531,72 @@ KTDEF(slab_osc_extent_alloc);
 EXPORT_SYMBOL(slab_osc_extent_alloc_clock);
 static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
 {
-	struct osc_extent *ext;
-	ktime_t localclock[2];
+        struct osc_extent *ext;
+        ktime_t localclock[2];
 
-	ktget(&localclock[0]);
-	OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
-	ktget(&localclock[1]);
-	ktput(localclock, slab_osc_extent_alloc);
-	if (ext == NULL)
-		return NULL;
+        test_extent_pool_init_once();
 
-	RB_CLEAR_NODE(&ext->oe_node);
-	ext->oe_obj = obj;
-	cl_object_get(osc2cl(obj));
-	kref_init(&ext->oe_refc);
-	atomic_set(&ext->oe_users, 0);
-	INIT_LIST_HEAD(&ext->oe_link);
-	ext->oe_state = OES_INV;
-	INIT_LIST_HEAD(&ext->oe_pages);
-	init_waitqueue_head(&ext->oe_waitq);
-	ext->oe_dlmlock = NULL;
+        ktget(&localclock[0]);
 
-	return ext;
+        ext = test_extent_pool_get();
+        ktget(&localclock[1]);
+        ktput(localclock, slab_osc_extent_alloc);
+
+
+        if (!ext)
+                ext = test_extent_pool_refill();
+
+        /*
+         * A pooled object contains data from its previous lifetime.
+         * Clear the whole object before rebuilding the normal osc_extent
+         * invariants below.  This also clears stale flag bits such as
+         * oe_hp/oe_urgent/oe_fsync_wait/oe_sync/oe_owner.
+         */
+        if (ext)
+                memset(ext, 0, sizeof(*ext));
+
+        if (ext == NULL)
+                return NULL;
+
+        RB_CLEAR_NODE(&ext->oe_node);
+        ext->oe_obj = obj;
+        cl_object_get(osc2cl(obj));
+        kref_init(&ext->oe_refc);
+        atomic_set(&ext->oe_users, 0);
+        INIT_LIST_HEAD(&ext->oe_link);
+        ext->oe_state = OES_INV;
+        INIT_LIST_HEAD(&ext->oe_pages);
+        init_waitqueue_head(&ext->oe_waitq);
+        ext->oe_dlmlock = NULL;
+
+        return ext;
 }
+
+//static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
+//{
+//	struct osc_extent *ext;
+//	ktime_t localclock[2];
+//
+//	ktget(&localclock[0]);
+//	OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
+//	ktget(&localclock[1]);
+//	ktput(localclock, slab_osc_extent_alloc);
+//	if (ext == NULL)
+//		return NULL;
+//
+//	RB_CLEAR_NODE(&ext->oe_node);
+//	ext->oe_obj = obj;
+//	cl_object_get(osc2cl(obj));
+//	kref_init(&ext->oe_refc);
+//	atomic_set(&ext->oe_users, 0);
+//	INIT_LIST_HEAD(&ext->oe_link);
+//	ext->oe_state = OES_INV;
+//	INIT_LIST_HEAD(&ext->oe_pages);
+//	init_waitqueue_head(&ext->oe_waitq);
+//	ext->oe_dlmlock = NULL;
+//
+//	return ext;
+//}
 
 static void osc_extent_free(struct kref *kref)
 {
@@ -382,18 +632,39 @@ static struct osc_extent *osc_extent_get(struct osc_extent *ext)
 	return ext;
 }
 
-static void osc_extent_put(const struct lu_env *env, struct osc_extent *ext)
+static void osc_extent_put(const struct lu_env *env,
+                           struct osc_extent *ext)
 {
-	LASSERT(kref_read(&ext->oe_refc) > 0);
-	if (kref_put(&ext->oe_refc, osc_extent_free)) {
-		/* This should be in osc_extent_free(), but
-		 * while we need to pass 'env' it cannot be.
-		 */
-		cl_object_put(env, osc2cl(ext->oe_obj));
+        LASSERT(kref_read(&ext->oe_refc) > 0);
 
-		OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
-	}
+        if (kref_put(&ext->oe_refc, osc_extent_free)) {
+                /*
+                 * Original cleanup.
+                 */
+                cl_object_put(env, osc2cl(ext->oe_obj));
+
+                /*
+                 * Instead of immediately returning to SLAB,
+                 * keep it in the temporary per-CPU pool.
+                 */
+                if (!test_extent_pool_put(ext))
+                        OBD_SLAB_FREE_PTR(ext,
+                                          osc_extent_kmem);
+        }
 }
+
+//static void osc_extent_put(const struct lu_env *env, struct osc_extent *ext)
+//{
+//	LASSERT(kref_read(&ext->oe_refc) > 0);
+//	if (kref_put(&ext->oe_refc, osc_extent_free)) {
+//		/* This should be in osc_extent_free(), but
+//		 * while we need to pass 'env' it cannot be.
+//		 */
+//		cl_object_put(env, osc2cl(ext->oe_obj));
+//
+//		OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
+//	}
+//}
 
 /**
  * osc_extent_put_trust() is a special version of osc_extent_put() when
@@ -4461,3 +4732,4 @@ out:
 
 
 /** @} osc */
+
