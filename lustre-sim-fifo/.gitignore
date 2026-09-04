@@ -62,3 +62,4 @@ linux-kernel/scripts/kconfig/zconf.*
 *.Plo
 *.Po
 *.state
+diff.txt

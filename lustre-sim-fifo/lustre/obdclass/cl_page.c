@@ -136,7 +136,7 @@ int cl_page_pool_init(void)
 	if (READ_ONCE(test_cl_page_pool_enabled))
 		return 0;
 
-	for_each_possible_cpu(cpu) {
+	for_each_online_cpu(cpu) {
 		struct test_cl_page_pool_cpu *pool;
 
 		pool = per_cpu_ptr(&test_cl_page_pool, cpu);
@@ -179,7 +179,7 @@ void cl_page_pool_fini(void)
 	WRITE_ONCE(test_cl_page_pool_enabled, false);
 	smp_mb();
 
-	for_each_possible_cpu(cpu) {
+	for_each_online_cpu(cpu) {
 		struct test_cl_page_pool_cpu *pool;
 		LIST_HEAD(local_list);
 		unsigned long flags;
