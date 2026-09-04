@@ -1118,6 +1118,7 @@ void cl_global_fini(void)
 {
 	int i;
 
+	cl_page_pool_fini();
 	for (i = 0; i < ARRAY_SIZE(cl_page_kmem_array); i++) {
 		if (cl_page_kmem_array[i]) {
 			kmem_cache_destroy(cl_page_kmem_array[i]);

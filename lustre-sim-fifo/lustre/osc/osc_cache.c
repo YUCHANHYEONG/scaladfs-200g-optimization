@@ -46,8 +46,8 @@
 #include <linux/percpu.h>
 #include <linux/cpu.h>
 
-#define TEST_EXTENT_POOL_MAX       1024
-#define TEST_EXTENT_POOL_REFILL      64
+#define TEST_EXTENT_POOL_MAX       1000000
+#define TEST_EXTENT_POOL_REFILL      1000000
 
 struct test_extent_pool_cpu {
         spinlock_t              lock;
