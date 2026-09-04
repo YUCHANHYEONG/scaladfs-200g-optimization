@@ -48,175 +48,233 @@
 #include "../include/calclock.h"
 #include <linux/percpu.h>
 #include <linux/cpu.h>
+#include <linux/sched.h>
 
 /*
- * Temporary pre-allocation pool for ptlrpc_request_set.
+ * Init-time preallocation pool for ptlrpc_request_set.
  *
- * TEST ONLY:
- *   - used to check whether OBD_CPT_ALLOC() is a bottleneck
- *   - each CPU has its own freelist
- *   - on a miss, TEST_SET_POOL_REFILL objects are allocated at once
+ * TEST_SET_POOL_TOTAL is the total reserve across all CPUs, not a per-CPU
+ * limit.  Each CPU receives a quota at ptlrpc module initialization.  Runtime
+ * allocation consumes the local quota first and steals from another CPU only
+ * when necessary.  There is no 1,000,000-object refill loop in the write path.
  */
-//#define TEST_SET_POOL_MAX       256
-#define TEST_SET_POOL_MAX       1000000
-//#define TEST_SET_POOL_REFILL     64
-#define TEST_SET_POOL_REFILL    1000000
+#define TEST_SET_POOL_TOTAL       1000000U
 
 struct test_set_pool_cpu {
         spinlock_t              lock;
         struct list_head        free_list;
         unsigned int            nr;
+        unsigned int            capacity;
 };
 
 static DEFINE_PER_CPU(struct test_set_pool_cpu, test_set_pool);
-
-static DEFINE_MUTEX(test_set_pool_init_mutex);
 static bool test_set_pool_initialized;
+static bool test_set_pool_stopping;
 
-//static atomic64_t test_set_pool_hit  = ATOMIC64_INIT(0);
-//static atomic64_t test_set_pool_miss = ATOMIC64_INIT(0);
-
-
-static void test_set_pool_init_once(void)
-{
-        int cpu;
-
-        if (likely(READ_ONCE(test_set_pool_initialized)))
-                return;
-
-        mutex_lock(&test_set_pool_init_mutex);
-
-        if (!READ_ONCE(test_set_pool_initialized)) {
-                for_each_possible_cpu(cpu) {
-                        struct test_set_pool_cpu *pool;
-
-                        pool = per_cpu_ptr(&test_set_pool, cpu);
-
-                        spin_lock_init(&pool->lock);
-                        INIT_LIST_HEAD(&pool->free_list);
-                        pool->nr = 0;
-                }
-
-                smp_wmb();
-                WRITE_ONCE(test_set_pool_initialized, true);
-        }
-
-        mutex_unlock(&test_set_pool_init_mutex);
-}
-
-static struct ptlrpc_request_set *test_set_pool_get(void)
+static struct ptlrpc_request_set *test_set_pool_pop_cpu(int cpu)
 {
         struct test_set_pool_cpu *pool;
         struct ptlrpc_request_set *set = NULL;
         struct list_head *node;
         unsigned long flags;
 
-        preempt_disable();
-
-        pool = this_cpu_ptr(&test_set_pool);
-
+        pool = per_cpu_ptr(&test_set_pool, cpu);
         spin_lock_irqsave(&pool->lock, flags);
-
         if (!list_empty(&pool->free_list)) {
                 node = pool->free_list.next;
                 list_del(node);
+                LASSERT(pool->nr > 0);
                 pool->nr--;
-
-                /*
-                 * The object itself is used as a temporary list_head
-                 * while it is in the pool.
-                 */
                 set = (struct ptlrpc_request_set *)node;
         }
-
         spin_unlock_irqrestore(&pool->lock, flags);
-
-        preempt_enable();
-
-//        if (set)
-//                atomic64_inc(&test_set_pool_hit);
-//        else
-//                atomic64_inc(&test_set_pool_miss);
 
         return set;
 }
 
-static bool test_set_pool_put(struct ptlrpc_request_set *set)
+static struct ptlrpc_request_set *test_set_pool_get(void)
+{
+        struct ptlrpc_request_set *set;
+        int local_cpu;
+        int cpu;
+
+        if (unlikely(!READ_ONCE(test_set_pool_initialized) ||
+                     READ_ONCE(test_set_pool_stopping)))
+                return NULL;
+
+        preempt_disable();
+        local_cpu = smp_processor_id();
+        set = test_set_pool_pop_cpu(local_cpu);
+        preempt_enable();
+        if (set)
+                return set;
+
+        for_each_possible_cpu(cpu) {
+                if (cpu == local_cpu)
+                        continue;
+                set = test_set_pool_pop_cpu(cpu);
+                if (set)
+                        return set;
+        }
+
+        return NULL;
+}
+
+static bool test_set_pool_push_cpu(struct ptlrpc_request_set *set, int cpu)
 {
         struct test_set_pool_cpu *pool;
         unsigned long flags;
         bool inserted = false;
 
-        preempt_disable();
-
-        pool = this_cpu_ptr(&test_set_pool);
-
+        pool = per_cpu_ptr(&test_set_pool, cpu);
         spin_lock_irqsave(&pool->lock, flags);
-
-        if (pool->nr < TEST_SET_POOL_MAX) {
-                /*
-                 * set is dead at this point.
-                 * Reuse the beginning of the object as list_head.
-                 */
-                list_add((struct list_head *)set,
-                         &pool->free_list);
-
+        if (!READ_ONCE(test_set_pool_stopping) &&
+            pool->nr < pool->capacity) {
+                /* set is dead while pooled; reuse its first bytes as linkage. */
+                list_add((struct list_head *)set, &pool->free_list);
                 pool->nr++;
                 inserted = true;
         }
-
         spin_unlock_irqrestore(&pool->lock, flags);
-
-        preempt_enable();
 
         return inserted;
 }
 
-static struct ptlrpc_request_set *
-test_set_pool_refill(int cpt)
+static bool test_set_pool_put(struct ptlrpc_request_set *set)
 {
-        struct ptlrpc_request_set *set = NULL;
-        struct ptlrpc_request_set *tmp;
-        int i;
+        int local_cpu;
+        int cpu;
 
-	printk("[%s]: start\n", __func__);
-        for (i = 0; i < TEST_SET_POOL_REFILL; i++) {
-                OBD_CPT_ALLOC(tmp, cfs_cpt_tab, cpt, sizeof(*tmp));
+        if (unlikely(!READ_ONCE(test_set_pool_initialized) ||
+                     READ_ONCE(test_set_pool_stopping)))
+                return false;
 
-                if (!tmp)
-                        break;
+        preempt_disable();
+        local_cpu = smp_processor_id();
+        if (test_set_pool_push_cpu(set, local_cpu)) {
+                preempt_enable();
+                return true;
+        }
+        preempt_enable();
 
-                /*
-                 * The first object is immediately returned to caller.
-                 * Remaining objects are stored in the pool.
-                 */
-                if (!set) {
-                        set = tmp;
+        for_each_possible_cpu(cpu) {
+                if (cpu == local_cpu)
                         continue;
-                }
-
-                if (!test_set_pool_put(tmp))
-                        OBD_FREE_PTR(tmp);
+                if (test_set_pool_push_cpu(set, cpu))
+                        return true;
         }
 
-        return set;
+        return false;
+}
+
+static void test_set_pool_fini(void)
+{
+        unsigned long total = 0;
+        int cpu;
+
+        if (!READ_ONCE(test_set_pool_initialized))
+                return;
+
+        WRITE_ONCE(test_set_pool_stopping, true);
+        smp_mb();
+
+        for_each_possible_cpu(cpu) {
+                struct test_set_pool_cpu *pool;
+                LIST_HEAD(local_list);
+                unsigned long flags;
+
+                pool = per_cpu_ptr(&test_set_pool, cpu);
+                spin_lock_irqsave(&pool->lock, flags);
+                list_splice_init(&pool->free_list, &local_list);
+                pool->nr = 0;
+                spin_unlock_irqrestore(&pool->lock, flags);
+
+                while (!list_empty(&local_list)) {
+                        struct list_head *node = local_list.next;
+                        struct ptlrpc_request_set *set;
+
+                        list_del(node);
+                        set = (struct ptlrpc_request_set *)node;
+                        OBD_FREE_PTR(set);
+                        total++;
+                }
+        }
+
+        pr_info("[reqset_pool] drained %lu objects\n", total);
+}
+
+static int test_set_pool_init(void)
+{
+        unsigned int ncpus = num_possible_cpus();
+        unsigned int base;
+        unsigned int rem;
+        unsigned int ordinal = 0;
+        unsigned long total = 0;
+        int cpu;
+
+        if (READ_ONCE(test_set_pool_initialized))
+                return 0;
+        if (unlikely(ncpus == 0))
+                return -EINVAL;
+
+        base = TEST_SET_POOL_TOTAL / ncpus;
+        rem = TEST_SET_POOL_TOTAL % ncpus;
+
+        for_each_possible_cpu(cpu) {
+                struct test_set_pool_cpu *pool;
+
+                pool = per_cpu_ptr(&test_set_pool, cpu);
+                spin_lock_init(&pool->lock);
+                INIT_LIST_HEAD(&pool->free_list);
+                pool->nr = 0;
+                pool->capacity = base + (ordinal < rem ? 1 : 0);
+                ordinal++;
+        }
+
+        WRITE_ONCE(test_set_pool_stopping, false);
+        smp_wmb();
+        WRITE_ONCE(test_set_pool_initialized, true);
+
+        for_each_possible_cpu(cpu) {
+                struct test_set_pool_cpu *pool;
+                int cpt;
+                unsigned int i;
+
+                pool = per_cpu_ptr(&test_set_pool, cpu);
+                cpt = cfs_cpt_of_cpu(cfs_cpt_tab, cpu);
+
+                for (i = 0; i < pool->capacity; i++) {
+                        struct ptlrpc_request_set *set = NULL;
+
+                        OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
+                        if (!set)
+                                goto out_nomem;
+
+                        list_add((struct list_head *)set, &pool->free_list);
+                        pool->nr++;
+                        total++;
+
+                        if ((total & 0xfffUL) == 0)
+                                cond_resched();
+                }
+        }
+
+        pr_info("[reqset_pool] preallocated %lu objects\n", total);
+        return 0;
+
+out_nomem:
+        CERROR("request-set pool preallocation stopped at %lu/%u objects\n",
+               total, TEST_SET_POOL_TOTAL);
+        test_set_pool_fini();
+        WRITE_ONCE(test_set_pool_initialized, false);
+        return -ENOMEM;
 }
 
 void ptlrpc_reqset_pool_release(struct ptlrpc_request_set *set)
 {
-        /*
-         * Normally test_set_pool_init_once() has already been called
-         * from ptlrpc_prep_set().
-         *
-         * Just in case this object came from another allocation path,
-         * fall back to the original free path.
-         */
-        if (!READ_ONCE(test_set_pool_initialized)) {
-                OBD_FREE_PTR(set);
-                return;
-        }
-
-        if (!test_set_pool_put(set))
+        if (!READ_ONCE(test_set_pool_initialized) ||
+            READ_ONCE(test_set_pool_stopping) ||
+            !test_set_pool_put(set))
                 OBD_FREE_PTR(set);
 }
 
@@ -895,14 +953,27 @@ static struct kmem_cache *request_cache;
 
 int ptlrpc_request_cache_init(void)
 {
+	int rc;
+
 	request_cache = kmem_cache_create("ptlrpc_cache",
 					  sizeof(struct ptlrpc_request),
 					  0, SLAB_HWCACHE_ALIGN, NULL);
-	return request_cache ? 0 : -ENOMEM;
+	if (!request_cache)
+		return -ENOMEM;
+
+	rc = test_set_pool_init();
+	if (rc) {
+		kmem_cache_destroy(request_cache);
+		request_cache = NULL;
+		return rc;
+	}
+
+	return 0;
 }
 
 void ptlrpc_request_cache_fini(void)
 {
+	test_set_pool_fini();
 	kmem_cache_destroy(request_cache);
 }
 
@@ -1445,8 +1516,6 @@ struct ptlrpc_request_set *ptlrpc_prep_set(void)
 
         ENTRY;
 
-        test_set_pool_init_once();
-
         cpt = cfs_cpt_current(cfs_cpt_tab, 0);
 
         ktget(&localclock[0]);
@@ -1456,8 +1525,9 @@ struct ptlrpc_request_set *ptlrpc_prep_set(void)
         ktget(&localclock[1]);
         ktput(localclock, slab_ptlrpc_prep_set);
 
+        /* Init-time reserve exhausted: allocate one normal set only. */
         if (!set)
-                set = test_set_pool_refill(cpt);
+                OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
 
 
         if (!set)
@@ -5289,3 +5359,4 @@ int ptlrpcd_queue_work(void *handler)
 	return 0;
 }
 EXPORT_SYMBOL(ptlrpcd_queue_work);
+

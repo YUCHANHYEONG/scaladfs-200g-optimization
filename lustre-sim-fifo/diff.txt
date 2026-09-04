@@ -1,0 +1,1114 @@
+diff --git a/lustre-sim-fifo/lustre/include/calclock.h b/lustre-sim-fifo/lustre/include/calclock.h
+index c66370556..c525688fb 100644
+--- a/lustre-sim-fifo/lustre/include/calclock.h
++++ b/lustre-sim-fifo/lustre/include/calclock.h
+@@ -11,7 +11,7 @@
+ #include <linux/percpu.h>
+ #include "lockfree_list.h"
+ 
+-#define CONFIG_CALCLOCK
++//#define CONFIG_CALCLOCK
+ 
+ struct calclock {
+ 	ktime_t time;
+diff --git a/lustre-sim-fifo/lustre/obdclass/cl_internal.h b/lustre-sim-fifo/lustre/obdclass/cl_internal.h
+index dba8cc4a5..0d66f5410 100755
+--- a/lustre-sim-fifo/lustre/obdclass/cl_internal.h
++++ b/lustre-sim-fifo/lustre/obdclass/cl_internal.h
+@@ -52,5 +52,6 @@ extern unsigned short cl_page_kmem_size_array[16];
+ 
+ struct cl_thread_info *cl_env_info(const struct lu_env *env);
+ void __cl_page_disown(const struct lu_env *env, struct cl_page *pg);
++void cl_page_pool_fini(void);
+ 
+ #endif /* _CL_INTERNAL_H */
+diff --git a/lustre-sim-fifo/lustre/obdclass/cl_object.c b/lustre-sim-fifo/lustre/obdclass/cl_object.c
+index 5061b418b..a5d879877 100755
+--- a/lustre-sim-fifo/lustre/obdclass/cl_object.c
++++ b/lustre-sim-fifo/lustre/obdclass/cl_object.c
+@@ -1118,6 +1118,7 @@ void cl_global_fini(void)
+ {
+ 	int i;
+ 
++	cl_page_pool_fini();
+ 	for (i = 0; i < ARRAY_SIZE(cl_page_kmem_array); i++) {
+ 		if (cl_page_kmem_array[i]) {
+ 			kmem_cache_destroy(cl_page_kmem_array[i]);
+diff --git a/lustre-sim-fifo/lustre/obdclass/cl_page.c b/lustre-sim-fifo/lustre/obdclass/cl_page.c
+index 145bb1df1..fd701d486 100755
+--- a/lustre-sim-fifo/lustre/obdclass/cl_page.c
++++ b/lustre-sim-fifo/lustre/obdclass/cl_page.c
+@@ -37,6 +37,9 @@
+ #define DEBUG_SUBSYSTEM S_CLASS
+ 
+ #include <linux/list.h>
++#include <linux/percpu.h>
++#include <linux/cpu.h>
++#include <linux/string.h>
+ #include <libcfs/libcfs.h>
+ #include <obd_class.h>
+ #include <obd_support.h>
+@@ -49,6 +52,262 @@
+ static void __cl_page_delete(const struct lu_env *env, struct cl_page *pg);
+ static DEFINE_MUTEX(cl_page_kmem_mutex);
+ 
++
++/*
++ * Temporary diagnostic pool for cl_page allocations.
++ *
++ * Each cl_page kmem cache has an independent per-CPU free list.  cp_batch is
++ * used as the pool linkage only after the cl_page has reached its final free
++ * path, where cl_page_free() already requires cp_batch to be empty.
++ *
++ * Keep these values modest.  A refill of 1,000,000 objects turns a single
++ * cache miss into a massive synchronous allocation burst.
++ */
++#define TEST_CL_PAGE_POOL_MAX         1000000
++#define TEST_CL_PAGE_POOL_REFILL       1000000
++
++struct test_cl_page_pool_entry {
++	spinlock_t		lock;
++	struct list_head	free_list;
++	unsigned int		nr;
++};
++
++struct test_cl_page_pool_cpu {
++	struct test_cl_page_pool_entry
++		entry[ARRAY_SIZE(cl_page_kmem_array)];
++};
++
++static DEFINE_PER_CPU(struct test_cl_page_pool_cpu, test_cl_page_pool);
++static DEFINE_MUTEX(test_cl_page_pool_init_mutex);
++static bool test_cl_page_pool_initialized;
++static bool test_cl_page_pool_stopping;
++
++static void test_cl_page_pool_init_once(void)
++{
++	int cpu;
++	int index;
++
++	if (likely(READ_ONCE(test_cl_page_pool_initialized)))
++		return;
++
++	mutex_lock(&test_cl_page_pool_init_mutex);
++
++	if (!READ_ONCE(test_cl_page_pool_initialized)) {
++		for_each_possible_cpu(cpu) {
++			struct test_cl_page_pool_cpu *pcpu;
++
++			pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
++
++			for (index = 0;
++			     index < ARRAY_SIZE(cl_page_kmem_array);
++			     index++) {
++				struct test_cl_page_pool_entry *pool;
++
++				pool = &pcpu->entry[index];
++				spin_lock_init(&pool->lock);
++				INIT_LIST_HEAD(&pool->free_list);
++				pool->nr = 0;
++			}
++		}
++
++		WRITE_ONCE(test_cl_page_pool_stopping, false);
++		smp_wmb();
++		WRITE_ONCE(test_cl_page_pool_initialized, true);
++	}
++
++	mutex_unlock(&test_cl_page_pool_init_mutex);
++}
++
++static struct cl_page *test_cl_page_pool_get(int index)
++{
++	struct test_cl_page_pool_cpu *pcpu;
++	struct test_cl_page_pool_entry *pool;
++	struct cl_page *cl_page = NULL;
++	unsigned long flags;
++
++	if (unlikely(index < 0 ||
++	    index >= ARRAY_SIZE(cl_page_kmem_array)))
++		return NULL;
++
++	if (unlikely(READ_ONCE(test_cl_page_pool_stopping)))
++		return NULL;
++
++	preempt_disable();
++
++	pcpu = this_cpu_ptr(&test_cl_page_pool);
++	pool = &pcpu->entry[index];
++
++	spin_lock_irqsave(&pool->lock, flags);
++
++	if (!list_empty(&pool->free_list)) {
++		cl_page = list_first_entry(&pool->free_list,
++					   struct cl_page,
++					   cp_batch);
++		list_del_init(&cl_page->cp_batch);
++		LASSERT(pool->nr > 0);
++		pool->nr--;
++	}
++
++	spin_unlock_irqrestore(&pool->lock, flags);
++	preempt_enable();
++
++	return cl_page;
++}
++
++static bool test_cl_page_pool_put(struct cl_page *cl_page, int index)
++{
++	struct test_cl_page_pool_cpu *pcpu;
++	struct test_cl_page_pool_entry *pool;
++	unsigned long flags;
++	bool inserted = false;
++
++	if (unlikely(index < 0 ||
++	    index >= ARRAY_SIZE(cl_page_kmem_array)))
++		return false;
++
++	/*
++	 * Once teardown starts, never retain another object in the private pool.
++	 * The caller will return it directly to its original kmem_cache.
++	 */
++	if (unlikely(READ_ONCE(test_cl_page_pool_stopping)))
++		return false;
++
++	LASSERT(list_empty(&cl_page->cp_batch));
++
++	preempt_disable();
++
++	pcpu = this_cpu_ptr(&test_cl_page_pool);
++	pool = &pcpu->entry[index];
++
++	spin_lock_irqsave(&pool->lock, flags);
++
++	/* Recheck under the pool lock to close the race with pool teardown. */
++	if (!READ_ONCE(test_cl_page_pool_stopping) &&
++	    pool->nr < TEST_CL_PAGE_POOL_MAX) {
++		list_add(&cl_page->cp_batch, &pool->free_list);
++		pool->nr++;
++		inserted = true;
++	}
++
++	spin_unlock_irqrestore(&pool->lock, flags);
++	preempt_enable();
++
++	return inserted;
++}
++
++static struct cl_page *test_cl_page_pool_refill(int index,
++						unsigned short bufsize)
++{
++	struct cl_page *cl_page = NULL;
++	struct cl_page *tmp;
++	int i;
++
++	if (unlikely(index < 0 ||
++	    index >= ARRAY_SIZE(cl_page_kmem_array)))
++		return NULL;
++
++	for (i = 0; i < TEST_CL_PAGE_POOL_REFILL; i++) {
++		if (unlikely(READ_ONCE(test_cl_page_pool_stopping)))
++			break;
++
++		tmp = NULL;
++		OBD_SLAB_ALLOC_GFP(tmp, cl_page_kmem_array[index],
++				   bufsize, GFP_NOFS);
++		if (!tmp)
++			break;
++
++		/*
++		 * The freshly allocated object may be put into the pool before the
++		 * normal cl_page initialization runs, so initialize only the linkage
++		 * needed by the pool here.  The whole bufsize is cleared when the
++		 * object is actually handed to cl_page_alloc().
++		 */
++		tmp->cp_kmem_index = index;
++		INIT_LIST_HEAD(&tmp->cp_batch);
++
++		if (!cl_page) {
++			cl_page = tmp;
++			continue;
++		}
++
++		if (!test_cl_page_pool_put(tmp, index))
++			OBD_SLAB_FREE(tmp, cl_page_kmem_array[index],
++				      bufsize);
++	}
++
++	return cl_page;
++}
++
++/*
++ * Drain all objects retained by the diagnostic cl_page pool.
++ *
++ * IMPORTANT: cl_page_pool_fini() must be called before cl_global_fini()
++ * destroys cl_page_kmem_array[] entries (or, more precisely, from
++ * cl_global_fini() immediately before its kmem_cache_destroy() loop).
++ */
++void cl_page_pool_fini(void)
++{
++	unsigned long drained[ARRAY_SIZE(cl_page_kmem_array)] = { 0 };
++	int cpu;
++	int index;
++
++	if (!READ_ONCE(test_cl_page_pool_initialized))
++		return;
++
++	WRITE_ONCE(test_cl_page_pool_stopping, true);
++	smp_mb();
++
++	for_each_possible_cpu(cpu) {
++		struct test_cl_page_pool_cpu *pcpu;
++
++		pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
++
++		for (index = 0;
++		     index < ARRAY_SIZE(cl_page_kmem_array);
++		     index++) {
++			struct test_cl_page_pool_entry *pool;
++			LIST_HEAD(local_list);
++			unsigned long flags;
++			unsigned short bufsize;
++
++			pool = &pcpu->entry[index];
++
++			spin_lock_irqsave(&pool->lock, flags);
++			list_splice_init(&pool->free_list, &local_list);
++			pool->nr = 0;
++			spin_unlock_irqrestore(&pool->lock, flags);
++
++			bufsize = smp_load_acquire(
++					&cl_page_kmem_size_array[index]);
++
++			while (!list_empty(&local_list)) {
++				struct cl_page *cl_page;
++
++				cl_page = list_first_entry(&local_list,
++							   struct cl_page,
++							   cp_batch);
++				list_del_init(&cl_page->cp_batch);
++
++				/* A pooled object implies that this cache exists. */
++				LASSERT(cl_page_kmem_array[index] != NULL);
++				LASSERT(bufsize != 0);
++
++				OBD_SLAB_FREE(cl_page,
++					      cl_page_kmem_array[index],
++					      bufsize);
++				drained[index]++;
++			}
++		}
++	}
++
++	for (index = 0; index < ARRAY_SIZE(cl_page_kmem_array); index++) {
++		if (drained[index])
++			pr_info("[cl_page_pool] cache=%d size=%u drained=%lu\n",
++				index, cl_page_kmem_size_array[index],
++				drained[index]);
++	}
++}
++
+ #ifdef LIBCFS_DEBUG
+ # define PASSERT(env, page, expr)                                       \
+   do {                                                                    \
+@@ -154,8 +413,17 @@ static void __cl_page_free(struct cl_page *cl_page, unsigned short bufsize)
+ 	if (index >= 0) {
+ 		LASSERT(index < ARRAY_SIZE(cl_page_kmem_array));
+ 		LASSERT(cl_page_kmem_size_array[index] == bufsize);
+-		OBD_SLAB_FREE(cl_page, cl_page_kmem_array[index], bufsize);
++
++		/*
++		 * Keep final-freed slab-backed cl_page objects in the temporary
++		 * per-CPU pool.  If the pool is full or teardown has started,
++		 * return the object to the original kmem cache immediately.
++		 */
++		if (!test_cl_page_pool_put(cl_page, index))
++			OBD_SLAB_FREE(cl_page, cl_page_kmem_array[index],
++				      bufsize);
+ 	} else {
++		/* Objects allocated by the fallback OBD_ALLOC path are not pooled. */
+ 		OBD_FREE(cl_page, bufsize);
+ 	}
+ }
+@@ -211,6 +479,8 @@ static struct cl_page *__cl_page_alloc(struct cl_object *o)
+ 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_PAGE_ALLOC))
+ 		return NULL;
+ 
++	test_cl_page_pool_init_once();
++
+ check:
+ 	/* the number of entries in cl_page_kmem_array is expected to
+ 	 * only be 2-3 entries, so the lookup overhead should be low.
+@@ -219,12 +489,27 @@ check:
+ 		if (smp_load_acquire(&cl_page_kmem_size_array[i])
+ 		    == bufsize) {
+ 			ktget(&localclock[0]);
+-			OBD_SLAB_ALLOC_GFP(cl_page, cl_page_kmem_array[i],
+-					   bufsize, GFP_NOFS);
++
++			cl_page = test_cl_page_pool_get(i);
+ 			ktget(&localclock[1]);
+ 			ktput(localclock, slab__cl_page_alloc);
++
++			if (!cl_page)
++				cl_page = test_cl_page_pool_refill(i, bufsize);
++
++			/*
++			 * cl_page allocations contain layer-private slices after
++			 * struct cl_page.  Clear the entire allocation, not merely
++			 * sizeof(struct cl_page), so a recycled page cannot expose
++			 * stale state from the previous lifetime.
++			 */
++			if (cl_page)
++				memset(cl_page, 0, bufsize);
++
++
+ 			if (cl_page)
+ 				cl_page->cp_kmem_index = i;
++
+ 			return cl_page;
+ 		}
+ 		if (cl_page_kmem_size_array[i] == 0)
+@@ -253,6 +538,10 @@ check:
+ 		mutex_unlock(&cl_page_kmem_mutex);
+ 		goto check;
+ 	} else {
++		/*
++		 * Preserve the original fallback behavior when all slab-cache
++		 * slots are occupied.  This path is deliberately not pooled.
++		 */
+ 		OBD_ALLOC_GFP(cl_page, bufsize, GFP_NOFS);
+ 		if (cl_page)
+ 			cl_page->cp_kmem_index = -1;
+@@ -1260,3 +1549,4 @@ void cl_cache_decref(struct cl_client_cache *cache)
+ 		OBD_FREE(cache, sizeof(*cache));
+ }
+ EXPORT_SYMBOL(cl_cache_decref);
++
+diff --git a/lustre-sim-fifo/lustre/osc/osc_cache.c b/lustre-sim-fifo/lustre/osc/osc_cache.c
+index 4b3741871..6f88e6168 100755
+--- a/lustre-sim-fifo/lustre/osc/osc_cache.c
++++ b/lustre-sim-fifo/lustre/osc/osc_cache.c
+@@ -43,6 +43,213 @@
+ 
+ #include "osc_internal.h"
+ 
++#include <linux/percpu.h>
++#include <linux/cpu.h>
++
++#define TEST_EXTENT_POOL_MAX       1000000
++#define TEST_EXTENT_POOL_REFILL      1000000
++
++struct test_extent_pool_cpu {
++        spinlock_t              lock;
++        struct list_head        free_list;
++        unsigned int            nr;
++};
++
++static DEFINE_PER_CPU(struct test_extent_pool_cpu, test_extent_pool);
++
++static DEFINE_MUTEX(test_extent_pool_init_mutex);
++static bool test_extent_pool_initialized;
++static bool test_extent_pool_stopping;
++
++static void test_extent_pool_init_once(void)
++{
++        int cpu;
++
++        if (likely(READ_ONCE(test_extent_pool_initialized)))
++                return;
++
++        mutex_lock(&test_extent_pool_init_mutex);
++
++        if (!READ_ONCE(test_extent_pool_initialized)) {
++                for_each_possible_cpu(cpu) {
++                        struct test_extent_pool_cpu *pool;
++
++                        pool = per_cpu_ptr(&test_extent_pool, cpu);
++
++                        spin_lock_init(&pool->lock);
++                        INIT_LIST_HEAD(&pool->free_list);
++                        pool->nr = 0;
++                }
++
++                WRITE_ONCE(test_extent_pool_stopping, false);
++                smp_wmb();
++                WRITE_ONCE(test_extent_pool_initialized, true);
++        }
++
++        mutex_unlock(&test_extent_pool_init_mutex);
++}
++
++static struct osc_extent *test_extent_pool_get(void)
++{
++        struct test_extent_pool_cpu *pool;
++        struct osc_extent *ext = NULL;
++        unsigned long flags;
++
++        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
++                return NULL;
++
++        preempt_disable();
++
++        pool = this_cpu_ptr(&test_extent_pool);
++
++        spin_lock_irqsave(&pool->lock, flags);
++
++        if (!list_empty(&pool->free_list)) {
++                ext = list_first_entry(&pool->free_list,
++                                       struct osc_extent,
++                                       oe_link);
++
++                list_del_init(&ext->oe_link);
++
++                LASSERT(pool->nr > 0);
++                pool->nr--;
++        }
++
++        spin_unlock_irqrestore(&pool->lock, flags);
++
++        preempt_enable();
++
++        return ext;
++}
++
++static bool test_extent_pool_put(struct osc_extent *ext)
++{
++        struct test_extent_pool_cpu *pool;
++        unsigned long flags;
++        bool inserted = false;
++
++        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
++                return false;
++
++        /*
++         * The normal final-release path guarantees that oe_link is detached
++         * before the osc_extent is eligible for reuse.  Reuse oe_link as the
++         * pool's freelist node; never cast the beginning of struct osc_extent
++         * to struct list_head.
++         */
++        LASSERT(list_empty(&ext->oe_link));
++
++        preempt_disable();
++
++        pool = this_cpu_ptr(&test_extent_pool);
++
++        spin_lock_irqsave(&pool->lock, flags);
++
++        /*
++         * Check stopping again while holding the pool lock so that a concurrent
++         * pool drain cannot race with insertion.
++         */
++        if (!READ_ONCE(test_extent_pool_stopping) &&
++            pool->nr < TEST_EXTENT_POOL_MAX) {
++                list_add(&ext->oe_link, &pool->free_list);
++                pool->nr++;
++                inserted = true;
++        }
++
++        spin_unlock_irqrestore(&pool->lock, flags);
++
++        preempt_enable();
++
++        return inserted;
++}
++
++static struct osc_extent *test_extent_pool_refill(void)
++{
++        struct osc_extent *ext = NULL;
++        struct osc_extent *tmp;
++        int i;
++
++        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
++                return NULL;
++
++        for (i = 0; i < TEST_EXTENT_POOL_REFILL; i++) {
++                tmp = NULL;
++
++                OBD_SLAB_ALLOC_PTR_GFP(tmp,
++                                       osc_extent_kmem,
++                                       GFP_NOFS);
++
++                if (!tmp)
++                        break;
++
++                /* oe_link is the pool node, so make it a valid empty list. */
++                INIT_LIST_HEAD(&tmp->oe_link);
++
++                if (!ext) {
++                        ext = tmp;
++                        continue;
++                }
++
++                if (!test_extent_pool_put(tmp))
++                        OBD_SLAB_FREE_PTR(tmp, osc_extent_kmem);
++        }
++
++        return ext;
++}
++
++/*
++ * Drain every object retained by the temporary per-CPU extent pool.
++ *
++ * This MUST run after new OSC users have been stopped and BEFORE
++ * lu_kmem_fini(osc_caches) destroys osc_extent_kmem.
++ */
++void osc_extent_pool_fini(void)
++{
++        int cpu;
++        unsigned long total = 0;
++
++        if (!READ_ONCE(test_extent_pool_initialized))
++                return;
++
++        WRITE_ONCE(test_extent_pool_stopping, true);
++        smp_mb();
++
++        for_each_possible_cpu(cpu) {
++                struct test_extent_pool_cpu *pool;
++                LIST_HEAD(local_list);
++                unsigned long flags;
++                unsigned int nr;
++
++                pool = per_cpu_ptr(&test_extent_pool, cpu);
++
++                spin_lock_irqsave(&pool->lock, flags);
++
++                nr = pool->nr;
++                list_splice_init(&pool->free_list, &local_list);
++                pool->nr = 0;
++
++                spin_unlock_irqrestore(&pool->lock, flags);
++
++                while (!list_empty(&local_list)) {
++                        struct osc_extent *ext;
++
++                        ext = list_first_entry(&local_list,
++                                               struct osc_extent,
++                                               oe_link);
++                        list_del_init(&ext->oe_link);
++                        OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
++                        total++;
++                }
++
++                if (nr != 0)
++                        pr_info("[extent_pool] CPU %d: drained %u objects\n",
++                                cpu, nr);
++        }
++
++}
++
++
++
+ static int extent_debug; /* set it to be true for more debug */
+ 
+ static void osc_update_pending(struct osc_object *obj, int cmd, int delta);
+@@ -324,30 +531,73 @@ KTDEF(slab_osc_extent_alloc);
+ EXPORT_SYMBOL(slab_osc_extent_alloc_clock);
+ static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
+ {
+-	struct osc_extent *ext;
+-	ktime_t localclock[2];
++        struct osc_extent *ext;
++        ktime_t localclock[2];
+ 
+-	ktget(&localclock[0]);
+-	OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
+-	ktget(&localclock[1]);
+-	ktput(localclock, slab_osc_extent_alloc);
+-	if (ext == NULL)
+-		return NULL;
++        test_extent_pool_init_once();
+ 
+-	RB_CLEAR_NODE(&ext->oe_node);
+-	ext->oe_obj = obj;
+-	cl_object_get(osc2cl(obj));
+-	kref_init(&ext->oe_refc);
+-	atomic_set(&ext->oe_users, 0);
+-	INIT_LIST_HEAD(&ext->oe_link);
+-	ext->oe_state = OES_INV;
+-	INIT_LIST_HEAD(&ext->oe_pages);
+-	init_waitqueue_head(&ext->oe_waitq);
+-	ext->oe_dlmlock = NULL;
++        ktget(&localclock[0]);
+ 
+-	return ext;
++        ext = test_extent_pool_get();
++        ktget(&localclock[1]);
++        ktput(localclock, slab_osc_extent_alloc);
++
++
++        if (!ext)
++                ext = test_extent_pool_refill();
++
++        /*
++         * A pooled object contains data from its previous lifetime.
++         * Clear the whole object before rebuilding the normal osc_extent
++         * invariants below.  This also clears stale flag bits such as
++         * oe_hp/oe_urgent/oe_fsync_wait/oe_sync/oe_owner.
++         */
++        if (ext)
++                memset(ext, 0, sizeof(*ext));
++
++        if (ext == NULL)
++                return NULL;
++
++        RB_CLEAR_NODE(&ext->oe_node);
++        ext->oe_obj = obj;
++        cl_object_get(osc2cl(obj));
++        kref_init(&ext->oe_refc);
++        atomic_set(&ext->oe_users, 0);
++        INIT_LIST_HEAD(&ext->oe_link);
++        ext->oe_state = OES_INV;
++        INIT_LIST_HEAD(&ext->oe_pages);
++        init_waitqueue_head(&ext->oe_waitq);
++        ext->oe_dlmlock = NULL;
++
++        return ext;
+ }
+ 
++//static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
++//{
++//	struct osc_extent *ext;
++//	ktime_t localclock[2];
++//
++//	ktget(&localclock[0]);
++//	OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
++//	ktget(&localclock[1]);
++//	ktput(localclock, slab_osc_extent_alloc);
++//	if (ext == NULL)
++//		return NULL;
++//
++//	RB_CLEAR_NODE(&ext->oe_node);
++//	ext->oe_obj = obj;
++//	cl_object_get(osc2cl(obj));
++//	kref_init(&ext->oe_refc);
++//	atomic_set(&ext->oe_users, 0);
++//	INIT_LIST_HEAD(&ext->oe_link);
++//	ext->oe_state = OES_INV;
++//	INIT_LIST_HEAD(&ext->oe_pages);
++//	init_waitqueue_head(&ext->oe_waitq);
++//	ext->oe_dlmlock = NULL;
++//
++//	return ext;
++//}
++
+ static void osc_extent_free(struct kref *kref)
+ {
+ 	struct osc_extent *ext = container_of(kref, struct osc_extent,
+@@ -382,19 +632,40 @@ static struct osc_extent *osc_extent_get(struct osc_extent *ext)
+ 	return ext;
+ }
+ 
+-static void osc_extent_put(const struct lu_env *env, struct osc_extent *ext)
++static void osc_extent_put(const struct lu_env *env,
++                           struct osc_extent *ext)
+ {
+-	LASSERT(kref_read(&ext->oe_refc) > 0);
+-	if (kref_put(&ext->oe_refc, osc_extent_free)) {
+-		/* This should be in osc_extent_free(), but
+-		 * while we need to pass 'env' it cannot be.
+-		 */
+-		cl_object_put(env, osc2cl(ext->oe_obj));
+-
+-		OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
+-	}
++        LASSERT(kref_read(&ext->oe_refc) > 0);
++
++        if (kref_put(&ext->oe_refc, osc_extent_free)) {
++                /*
++                 * Original cleanup.
++                 */
++                cl_object_put(env, osc2cl(ext->oe_obj));
++
++                /*
++                 * Instead of immediately returning to SLAB,
++                 * keep it in the temporary per-CPU pool.
++                 */
++                if (!test_extent_pool_put(ext))
++                        OBD_SLAB_FREE_PTR(ext,
++                                          osc_extent_kmem);
++        }
+ }
+ 
++//static void osc_extent_put(const struct lu_env *env, struct osc_extent *ext)
++//{
++//	LASSERT(kref_read(&ext->oe_refc) > 0);
++//	if (kref_put(&ext->oe_refc, osc_extent_free)) {
++//		/* This should be in osc_extent_free(), but
++//		 * while we need to pass 'env' it cannot be.
++//		 */
++//		cl_object_put(env, osc2cl(ext->oe_obj));
++//
++//		OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
++//	}
++//}
++
+ /**
+  * osc_extent_put_trust() is a special version of osc_extent_put() when
+  * it's known that the caller is not the last user. This is to address the
+@@ -4461,3 +4732,4 @@ out:
+ 
+ 
+ /** @} osc */
++
+diff --git a/lustre-sim-fifo/lustre/osc/osc_internal.h b/lustre-sim-fifo/lustre/osc/osc_internal.h
+index 93c0e29c3..a5fa06190 100755
+--- a/lustre-sim-fifo/lustre/osc/osc_internal.h
++++ b/lustre-sim-fifo/lustre/osc/osc_internal.h
+@@ -43,6 +43,9 @@ extern atomic_t osc_pool_req_count;
+ extern unsigned int osc_reqpool_maxreqcount;
+ extern struct ptlrpc_request_pool *osc_rq_pool;
+ 
++void osc_extent_pool_fini(void);
++
++
+ int osc_shrink_grant_to_target(struct client_obd *cli, __u64 target_bytes);
+ void osc_schedule_grant_work(void);
+ void osc_update_next_shrink(struct client_obd *cli);
+diff --git a/lustre-sim-fifo/lustre/osc/osc_request.c b/lustre-sim-fifo/lustre/osc/osc_request.c
+index cd770aeca..30d93e088 100755
+--- a/lustre-sim-fifo/lustre/osc/osc_request.c
++++ b/lustre-sim-fifo/lustre/osc/osc_request.c
+@@ -4503,10 +4503,12 @@ out_kmem:
+ 
+ static void __exit osc_exit(void)
+ {
++
+ 	class_unregister_type(LUSTRE_OSC_NAME);
+ 	ptlrpc_free_rq_pool(osc_rq_pool);
+ 	osc_stop_grant_work();
+ 	unregister_shrinker(&osc_cache_shrinker);
++	osc_extent_pool_fini();
+ 	lu_kmem_fini(osc_caches);
+ }
+ 
+diff --git a/lustre-sim-fifo/lustre/ptlrpc/client.c b/lustre-sim-fifo/lustre/ptlrpc/client.c
+index 16d02b74a..1101f489a 100755
+--- a/lustre-sim-fifo/lustre/ptlrpc/client.c
++++ b/lustre-sim-fifo/lustre/ptlrpc/client.c
+@@ -46,6 +46,179 @@
+ 
+ #include "ptlrpc_internal.h"
+ #include "../include/calclock.h"
++#include <linux/percpu.h>
++#include <linux/cpu.h>
++
++/*
++ * Temporary pre-allocation pool for ptlrpc_request_set.
++ *
++ * TEST ONLY:
++ *   - used to check whether OBD_CPT_ALLOC() is a bottleneck
++ *   - each CPU has its own freelist
++ *   - on a miss, TEST_SET_POOL_REFILL objects are allocated at once
++ */
++//#define TEST_SET_POOL_MAX       256
++#define TEST_SET_POOL_MAX       1000000
++//#define TEST_SET_POOL_REFILL     64
++#define TEST_SET_POOL_REFILL    1000000
++
++struct test_set_pool_cpu {
++        spinlock_t              lock;
++        struct list_head        free_list;
++        unsigned int            nr;
++};
++
++static DEFINE_PER_CPU(struct test_set_pool_cpu, test_set_pool);
++
++static DEFINE_MUTEX(test_set_pool_init_mutex);
++static bool test_set_pool_initialized;
++
++//static atomic64_t test_set_pool_hit  = ATOMIC64_INIT(0);
++//static atomic64_t test_set_pool_miss = ATOMIC64_INIT(0);
++
++
++static void test_set_pool_init_once(void)
++{
++        int cpu;
++
++        if (likely(READ_ONCE(test_set_pool_initialized)))
++                return;
++
++        mutex_lock(&test_set_pool_init_mutex);
++
++        if (!READ_ONCE(test_set_pool_initialized)) {
++                for_each_possible_cpu(cpu) {
++                        struct test_set_pool_cpu *pool;
++
++                        pool = per_cpu_ptr(&test_set_pool, cpu);
++
++                        spin_lock_init(&pool->lock);
++                        INIT_LIST_HEAD(&pool->free_list);
++                        pool->nr = 0;
++                }
++
++                smp_wmb();
++                WRITE_ONCE(test_set_pool_initialized, true);
++        }
++
++        mutex_unlock(&test_set_pool_init_mutex);
++}
++
++static struct ptlrpc_request_set *test_set_pool_get(void)
++{
++        struct test_set_pool_cpu *pool;
++        struct ptlrpc_request_set *set = NULL;
++        struct list_head *node;
++        unsigned long flags;
++
++        preempt_disable();
++
++        pool = this_cpu_ptr(&test_set_pool);
++
++        spin_lock_irqsave(&pool->lock, flags);
++
++        if (!list_empty(&pool->free_list)) {
++                node = pool->free_list.next;
++                list_del(node);
++                pool->nr--;
++
++                /*
++                 * The object itself is used as a temporary list_head
++                 * while it is in the pool.
++                 */
++                set = (struct ptlrpc_request_set *)node;
++        }
++
++        spin_unlock_irqrestore(&pool->lock, flags);
++
++        preempt_enable();
++
++//        if (set)
++//                atomic64_inc(&test_set_pool_hit);
++//        else
++//                atomic64_inc(&test_set_pool_miss);
++
++        return set;
++}
++
++static bool test_set_pool_put(struct ptlrpc_request_set *set)
++{
++        struct test_set_pool_cpu *pool;
++        unsigned long flags;
++        bool inserted = false;
++
++        preempt_disable();
++
++        pool = this_cpu_ptr(&test_set_pool);
++
++        spin_lock_irqsave(&pool->lock, flags);
++
++        if (pool->nr < TEST_SET_POOL_MAX) {
++                /*
++                 * set is dead at this point.
++                 * Reuse the beginning of the object as list_head.
++                 */
++                list_add((struct list_head *)set,
++                         &pool->free_list);
++
++                pool->nr++;
++                inserted = true;
++        }
++
++        spin_unlock_irqrestore(&pool->lock, flags);
++
++        preempt_enable();
++
++        return inserted;
++}
++
++static struct ptlrpc_request_set *
++test_set_pool_refill(int cpt)
++{
++        struct ptlrpc_request_set *set = NULL;
++        struct ptlrpc_request_set *tmp;
++        int i;
++
++	printk("[%s]: start\n", __func__);
++        for (i = 0; i < TEST_SET_POOL_REFILL; i++) {
++                OBD_CPT_ALLOC(tmp, cfs_cpt_tab, cpt, sizeof(*tmp));
++
++                if (!tmp)
++                        break;
++
++                /*
++                 * The first object is immediately returned to caller.
++                 * Remaining objects are stored in the pool.
++                 */
++                if (!set) {
++                        set = tmp;
++                        continue;
++                }
++
++                if (!test_set_pool_put(tmp))
++                        OBD_FREE_PTR(tmp);
++        }
++
++        return set;
++}
++
++void ptlrpc_reqset_pool_release(struct ptlrpc_request_set *set)
++{
++        /*
++         * Normally test_set_pool_init_once() has already been called
++         * from ptlrpc_prep_set().
++         *
++         * Just in case this object came from another allocation path,
++         * fall back to the original free path.
++         */
++        if (!READ_ONCE(test_set_pool_initialized)) {
++                OBD_FREE_PTR(set);
++                return;
++        }
++
++        if (!test_set_pool_put(set))
++                OBD_FREE_PTR(set);
++}
+ 
+ static void ptlrpc_prep_bulk_page_pin(struct ptlrpc_bulk_desc *desc,
+ 				      struct page *page, int pageoffset,
+@@ -1266,34 +1439,88 @@ EXPORT_SYMBOL(slab_ptlrpc_prep_set_clock);
+  */
+ struct ptlrpc_request_set *ptlrpc_prep_set(void)
+ {
+-	struct ptlrpc_request_set *set;
+-	int cpt;
+-	ktime_t localclock[2];
++        struct ptlrpc_request_set *set;
++        int cpt;
++        ktime_t localclock[2];
+ 
+-	ENTRY;
+-	cpt = cfs_cpt_current(cfs_cpt_tab, 0);
++        ENTRY;
+ 
+-	ktget(&localclock[0]);
+-	OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
+-	ktget(&localclock[1]);
+-	ktput(localclock, slab_ptlrpc_prep_set);
+-	if (!set)
+-		RETURN(NULL);
+-	atomic_set(&set->set_refcount, 1);
+-	INIT_LIST_HEAD(&set->set_requests);
+-	init_waitqueue_head(&set->set_waitq);
+-	atomic_set(&set->set_new_count, 0);
+-	atomic_set(&set->set_remaining, 0);
+-	spin_lock_init(&set->set_new_req_lock);
+-	INIT_LIST_HEAD(&set->set_new_requests);
+-	set->set_max_inflight = UINT_MAX;
+-	// set->set_max_inflight = 1;
+-	set->set_producer     = NULL;
+-	set->set_producer_arg = NULL;
+-	set->set_rc           = 0;
++        test_set_pool_init_once();
+ 
+-	RETURN(set);
++        cpt = cfs_cpt_current(cfs_cpt_tab, 0);
++
++        ktget(&localclock[0]);
++
++        set = test_set_pool_get();
++
++        ktget(&localclock[1]);
++        ktput(localclock, slab_ptlrpc_prep_set);
++
++        if (!set)
++                set = test_set_pool_refill(cpt);
++
++
++        if (!set)
++                RETURN(NULL);
++
++        /*
++         * VERY IMPORTANT:
++         *
++         * A pooled set contains values from its previous lifetime.
++         * Clear it before normal initialization.
++         */
++        memset(set, 0, sizeof(*set));
++
++        atomic_set(&set->set_refcount, 1);
++
++        INIT_LIST_HEAD(&set->set_requests);
++        init_waitqueue_head(&set->set_waitq);
++
++        atomic_set(&set->set_new_count, 0);
++        atomic_set(&set->set_remaining, 0);
++
++        spin_lock_init(&set->set_new_req_lock);
++        INIT_LIST_HEAD(&set->set_new_requests);
++
++        set->set_max_inflight = UINT_MAX;
++
++        set->set_producer     = NULL;
++        set->set_producer_arg = NULL;
++        set->set_rc           = 0;
++
++        RETURN(set);
+ }
++
++//struct ptlrpc_request_set *ptlrpc_prep_set(void)
++//{
++//	struct ptlrpc_request_set *set;
++//	int cpt;
++//	ktime_t localclock[2];
++//
++//	ENTRY;
++//	cpt = cfs_cpt_current(cfs_cpt_tab, 0);
++//
++//	ktget(&localclock[0]);
++//	OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
++//	ktget(&localclock[1]);
++//	ktput(localclock, slab_ptlrpc_prep_set);
++//	if (!set)
++//		RETURN(NULL);
++//	atomic_set(&set->set_refcount, 1);
++//	INIT_LIST_HEAD(&set->set_requests);
++//	init_waitqueue_head(&set->set_waitq);
++//	atomic_set(&set->set_new_count, 0);
++//	atomic_set(&set->set_remaining, 0);
++//	spin_lock_init(&set->set_new_req_lock);
++//	INIT_LIST_HEAD(&set->set_new_requests);
++//	set->set_max_inflight = UINT_MAX;
++//	// set->set_max_inflight = 1;
++//	set->set_producer     = NULL;
++//	set->set_producer_arg = NULL;
++//	set->set_rc           = 0;
++//
++//	RETURN(set);
++//}
+ EXPORT_SYMBOL(ptlrpc_prep_set);
+ 
+ struct ptlrpc_request_set *application_prep_set(void)
+diff --git a/lustre-sim-fifo/lustre/ptlrpc/ptlrpc_internal.h b/lustre-sim-fifo/lustre/ptlrpc/ptlrpc_internal.h
+index 9ed1c3507..374c1cd88 100755
+--- a/lustre-sim-fifo/lustre/ptlrpc/ptlrpc_internal.h
++++ b/lustre-sim-fifo/lustre/ptlrpc/ptlrpc_internal.h
+@@ -55,6 +55,8 @@ extern struct ptlrpc_nrs_pol_conf nrs_conf_trr;
+ extern struct ptlrpc_nrs_pol_conf nrs_conf_tbf;
+ #endif /* HAVE_SERVER_SUPPORT */
+ 
++void ptlrpc_reqset_pool_release(struct ptlrpc_request_set *set);
++
+ /**
+  * \addtogoup nrs
+  * @{
+@@ -346,10 +348,16 @@ void nodemap_mod_exit(void);
+ 
+ static inline void ptlrpc_reqset_put(struct ptlrpc_request_set *set)
+ {
+-	if (atomic_dec_and_test(&set->set_refcount))
+-		OBD_FREE_PTR(set);
++	        if (atomic_dec_and_test(&set->set_refcount))
++			                ptlrpc_reqset_pool_release(set);
+ }
+ 
++//static inline void ptlrpc_reqset_put(struct ptlrpc_request_set *set)
++//{
++//	if (atomic_dec_and_test(&set->set_refcount))
++//		OBD_FREE_PTR(set);
++//}
++
+ /** initialise ptlrpc common fields */
+ static inline void ptlrpc_req_comm_init(struct ptlrpc_request *req)
+ {

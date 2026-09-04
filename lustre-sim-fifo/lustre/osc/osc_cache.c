@@ -45,163 +45,193 @@
 
 #include <linux/percpu.h>
 #include <linux/cpu.h>
+#include <linux/sched.h>
 
-#define TEST_EXTENT_POOL_MAX       1000000
-#define TEST_EXTENT_POOL_REFILL      1000000
+#define TEST_EXTENT_POOL_TOTAL       1000000U
 
 struct test_extent_pool_cpu {
         spinlock_t              lock;
         struct list_head        free_list;
         unsigned int            nr;
+        unsigned int            capacity;
 };
 
 static DEFINE_PER_CPU(struct test_extent_pool_cpu, test_extent_pool);
-
-static DEFINE_MUTEX(test_extent_pool_init_mutex);
 static bool test_extent_pool_initialized;
 static bool test_extent_pool_stopping;
 
-static void test_extent_pool_init_once(void)
-{
-        int cpu;
+void osc_extent_pool_fini(void);
 
-        if (likely(READ_ONCE(test_extent_pool_initialized)))
-                return;
-
-        mutex_lock(&test_extent_pool_init_mutex);
-
-        if (!READ_ONCE(test_extent_pool_initialized)) {
-                for_each_possible_cpu(cpu) {
-                        struct test_extent_pool_cpu *pool;
-
-                        pool = per_cpu_ptr(&test_extent_pool, cpu);
-
-                        spin_lock_init(&pool->lock);
-                        INIT_LIST_HEAD(&pool->free_list);
-                        pool->nr = 0;
-                }
-
-                WRITE_ONCE(test_extent_pool_stopping, false);
-                smp_wmb();
-                WRITE_ONCE(test_extent_pool_initialized, true);
-        }
-
-        mutex_unlock(&test_extent_pool_init_mutex);
-}
-
-static struct osc_extent *test_extent_pool_get(void)
+static struct osc_extent *test_extent_pool_pop_cpu(int cpu)
 {
         struct test_extent_pool_cpu *pool;
         struct osc_extent *ext = NULL;
         unsigned long flags;
 
-        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
-                return NULL;
-
-        preempt_disable();
-
-        pool = this_cpu_ptr(&test_extent_pool);
-
+        pool = per_cpu_ptr(&test_extent_pool, cpu);
         spin_lock_irqsave(&pool->lock, flags);
-
         if (!list_empty(&pool->free_list)) {
                 ext = list_first_entry(&pool->free_list,
-                                       struct osc_extent,
-                                       oe_link);
-
+                                       struct osc_extent, oe_link);
                 list_del_init(&ext->oe_link);
-
                 LASSERT(pool->nr > 0);
                 pool->nr--;
         }
-
         spin_unlock_irqrestore(&pool->lock, flags);
-
-        preempt_enable();
 
         return ext;
 }
 
-static bool test_extent_pool_put(struct osc_extent *ext)
+static struct osc_extent *test_extent_pool_get(void)
+{
+        struct osc_extent *ext;
+        int local_cpu;
+        int cpu;
+
+        if (unlikely(!READ_ONCE(test_extent_pool_initialized) ||
+                     READ_ONCE(test_extent_pool_stopping)))
+                return NULL;
+
+        preempt_disable();
+        local_cpu = smp_processor_id();
+        ext = test_extent_pool_pop_cpu(local_cpu);
+        preempt_enable();
+        if (ext)
+                return ext;
+
+        /* Local pool empty: consume the already-reserved global stock first. */
+        for_each_possible_cpu(cpu) {
+                if (cpu == local_cpu)
+                        continue;
+                ext = test_extent_pool_pop_cpu(cpu);
+                if (ext)
+                        return ext;
+        }
+
+        return NULL;
+}
+
+static bool test_extent_pool_push_cpu(struct osc_extent *ext, int cpu)
 {
         struct test_extent_pool_cpu *pool;
         unsigned long flags;
         bool inserted = false;
 
-        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
-                return false;
-
-        /*
-         * The normal final-release path guarantees that oe_link is detached
-         * before the osc_extent is eligible for reuse.  Reuse oe_link as the
-         * pool's freelist node; never cast the beginning of struct osc_extent
-         * to struct list_head.
-         */
-        LASSERT(list_empty(&ext->oe_link));
-
-        preempt_disable();
-
-        pool = this_cpu_ptr(&test_extent_pool);
-
+        pool = per_cpu_ptr(&test_extent_pool, cpu);
         spin_lock_irqsave(&pool->lock, flags);
-
-        /*
-         * Check stopping again while holding the pool lock so that a concurrent
-         * pool drain cannot race with insertion.
-         */
         if (!READ_ONCE(test_extent_pool_stopping) &&
-            pool->nr < TEST_EXTENT_POOL_MAX) {
+            pool->nr < pool->capacity) {
                 list_add(&ext->oe_link, &pool->free_list);
                 pool->nr++;
                 inserted = true;
         }
-
         spin_unlock_irqrestore(&pool->lock, flags);
-
-        preempt_enable();
 
         return inserted;
 }
 
-static struct osc_extent *test_extent_pool_refill(void)
+static bool test_extent_pool_put(struct osc_extent *ext)
 {
-        struct osc_extent *ext = NULL;
-        struct osc_extent *tmp;
-        int i;
+        int local_cpu;
+        int cpu;
 
-        if (unlikely(READ_ONCE(test_extent_pool_stopping)))
-                return NULL;
+        if (unlikely(!READ_ONCE(test_extent_pool_initialized) ||
+                     READ_ONCE(test_extent_pool_stopping)))
+                return false;
 
-        for (i = 0; i < TEST_EXTENT_POOL_REFILL; i++) {
-                tmp = NULL;
+        LASSERT(list_empty(&ext->oe_link));
 
-                OBD_SLAB_ALLOC_PTR_GFP(tmp,
-                                       osc_extent_kmem,
-                                       GFP_NOFS);
+        preempt_disable();
+        local_cpu = smp_processor_id();
+        if (test_extent_pool_push_cpu(ext, local_cpu)) {
+                preempt_enable();
+                return true;
+        }
+        preempt_enable();
 
-                if (!tmp)
-                        break;
-
-                /* oe_link is the pool node, so make it a valid empty list. */
-                INIT_LIST_HEAD(&tmp->oe_link);
-
-                if (!ext) {
-                        ext = tmp;
+        /* Keep the total retained reserve bounded at exactly the init quota. */
+        for_each_possible_cpu(cpu) {
+                if (cpu == local_cpu)
                         continue;
-                }
-
-                if (!test_extent_pool_put(tmp))
-                        OBD_SLAB_FREE_PTR(tmp, osc_extent_kmem);
+                if (test_extent_pool_push_cpu(ext, cpu))
+                        return true;
         }
 
-        return ext;
+        return false;
+}
+
+/*
+ * Must be called after lu_kmem_init(osc_caches), because that creates
+ * osc_extent_kmem, and before OSC is registered for normal I/O.
+ */
+int osc_extent_pool_init(void)
+{
+        unsigned int ncpus = num_possible_cpus();
+        unsigned int base;
+        unsigned int rem;
+        unsigned int ordinal = 0;
+        unsigned long total = 0;
+        int cpu;
+
+        if (READ_ONCE(test_extent_pool_initialized))
+                return 0;
+        if (unlikely(ncpus == 0 || osc_extent_kmem == NULL))
+                return -EINVAL;
+
+        base = TEST_EXTENT_POOL_TOTAL / ncpus;
+        rem = TEST_EXTENT_POOL_TOTAL % ncpus;
+
+        for_each_possible_cpu(cpu) {
+                struct test_extent_pool_cpu *pool;
+
+                pool = per_cpu_ptr(&test_extent_pool, cpu);
+                spin_lock_init(&pool->lock);
+                INIT_LIST_HEAD(&pool->free_list);
+                pool->nr = 0;
+                pool->capacity = base + (ordinal < rem ? 1 : 0);
+                ordinal++;
+        }
+
+        WRITE_ONCE(test_extent_pool_stopping, false);
+        smp_wmb();
+        WRITE_ONCE(test_extent_pool_initialized, true);
+
+        for_each_possible_cpu(cpu) {
+                struct test_extent_pool_cpu *pool;
+                unsigned int i;
+
+                pool = per_cpu_ptr(&test_extent_pool, cpu);
+                for (i = 0; i < pool->capacity; i++) {
+                        struct osc_extent *ext = NULL;
+
+                        OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
+                        if (!ext)
+                                goto out_nomem;
+
+                        INIT_LIST_HEAD(&ext->oe_link);
+                        list_add(&ext->oe_link, &pool->free_list);
+                        pool->nr++;
+                        total++;
+
+                        if ((total & 0xfffUL) == 0)
+                                cond_resched();
+                }
+        }
+
+        pr_info("[extent_pool] preallocated %lu objects\n", total);
+        return 0;
+
+out_nomem:
+        CERROR("osc_extent pool preallocation stopped at %lu/%u objects\n",
+               total, TEST_EXTENT_POOL_TOTAL);
+        osc_extent_pool_fini();
+        WRITE_ONCE(test_extent_pool_initialized, false);
+        return -ENOMEM;
 }
 
 /*
  * Drain every object retained by the temporary per-CPU extent pool.
- *
- * This MUST run after new OSC users have been stopped and BEFORE
- * lu_kmem_fini(osc_caches) destroys osc_extent_kmem.
+ * This MUST run before lu_kmem_fini(osc_caches) destroys osc_extent_kmem.
  */
 void osc_extent_pool_fini(void)
 {
@@ -218,36 +248,26 @@ void osc_extent_pool_fini(void)
                 struct test_extent_pool_cpu *pool;
                 LIST_HEAD(local_list);
                 unsigned long flags;
-                unsigned int nr;
 
                 pool = per_cpu_ptr(&test_extent_pool, cpu);
-
                 spin_lock_irqsave(&pool->lock, flags);
-
-                nr = pool->nr;
                 list_splice_init(&pool->free_list, &local_list);
                 pool->nr = 0;
-
                 spin_unlock_irqrestore(&pool->lock, flags);
 
                 while (!list_empty(&local_list)) {
                         struct osc_extent *ext;
 
                         ext = list_first_entry(&local_list,
-                                               struct osc_extent,
-                                               oe_link);
+                                               struct osc_extent, oe_link);
                         list_del_init(&ext->oe_link);
                         OBD_SLAB_FREE_PTR(ext, osc_extent_kmem);
                         total++;
                 }
-
-                if (nr != 0)
-                        pr_info("[extent_pool] CPU %d: drained %u objects\n",
-                                cpu, nr);
         }
 
+        pr_info("[extent_pool] drained %lu objects\n", total);
 }
-
 
 
 static int extent_debug; /* set it to be true for more debug */
@@ -534,8 +554,6 @@ static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
         struct osc_extent *ext;
         ktime_t localclock[2];
 
-        test_extent_pool_init_once();
-
         ktget(&localclock[0]);
 
         ext = test_extent_pool_get();
@@ -543,8 +561,9 @@ static struct osc_extent *osc_extent_alloc(struct osc_object *obj)
         ktput(localclock, slab_osc_extent_alloc);
 
 
+        /* The init-time reserve is exhausted: allocate only one object. */
         if (!ext)
-                ext = test_extent_pool_refill();
+                OBD_SLAB_ALLOC_PTR_GFP(ext, osc_extent_kmem, GFP_NOFS);
 
         /*
          * A pooled object contains data from its previous lifetime.
@@ -4732,4 +4751,5 @@ out:
 
 
 /** @} osc */
+
 

@@ -48,6 +48,10 @@
 #include <obd_class.h>
 
 #include "osc_internal.h"
+
+/* init-time osc_extent reserve implemented in osc_cache.c */
+int osc_extent_pool_init(void);
+void osc_extent_pool_fini(void);
 #include <lnet/lnet_rdma.h>
 
 atomic_t osc_pool_req_count;
@@ -4449,9 +4453,18 @@ static int __init osc_init(void)
 	if (rc)
 		RETURN(rc);
 
-	rc = register_shrinker(&osc_cache_shrinker);
+	/*
+	 * osc_extent_kmem is created by lu_kmem_init(osc_caches).
+	 * Populate the entire osc_extent reserve now, before OSC is registered
+	 * and before normal write I/O can reach osc_extent_alloc().
+	 */
+	rc = osc_extent_pool_init();
 	if (rc)
 		GOTO(out_kmem, rc);
+
+	rc = register_shrinker(&osc_cache_shrinker);
+	if (rc)
+		GOTO(out_extent_pool, rc);
 
 	/* This is obviously too much memory, only prevent overflow here */
 	if (osc_reqpool_mem_max >= 1 << 12 || osc_reqpool_mem_max == 0)
@@ -4495,6 +4508,9 @@ out_req_pool:
 	ptlrpc_free_rq_pool(osc_rq_pool);
 out_shrinker:
 	unregister_shrinker(&osc_cache_shrinker);
+out_extent_pool:
+	/* Must drain pooled osc_extent objects before destroying osc_extent_kmem. */
+	osc_extent_pool_fini();
 out_kmem:
 	lu_kmem_fini(osc_caches);
 
@@ -4519,3 +4535,4 @@ MODULE_LICENSE("GPL");
 
 module_init(osc_init);
 module_exit(osc_exit);
+
