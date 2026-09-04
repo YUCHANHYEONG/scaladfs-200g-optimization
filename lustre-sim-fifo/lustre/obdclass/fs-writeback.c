@@ -1950,7 +1950,8 @@ __writeback_single_inode(struct inode *inode, struct writeback_control *wbc)
 	unsigned dirty;
 	int ret;
 
-	WARN_ON(!(inode->i_state & I_SYNC));
+	//WARN_ON(!(inode->i_state & I_SYNC));
+	//printk("[%s] inode->i_state is not I_SYNC\n", __func__);
 
 	// trace_writeback_single_inode_start(inode, wbc, nr_to_write);
 
@@ -2343,6 +2344,10 @@ static long lustre_writeback_single(struct super_block *sb, struct bdi_writeback
 	// 	pr_info("Wakeup from I_SYNC\n");
 	// 	spin_lock(&inode->i_lock);
 	// }
+	if (unlikely(inode->i_state & I_SYNC)) {
+		printk("[%s] i_state is already I_SYNC!\n", __func__);
+	}
+
 	inode->i_state |= I_SYNC;
 	lustre_wbc_attach_and_unlock_inode(&wbc, inode);
 	if (lnode) {

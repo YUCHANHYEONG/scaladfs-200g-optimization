@@ -18,8 +18,8 @@ runtime=30
 group_reporting
 
 [amd2]
-size=5G
-;size=100M
+;size=5G
+size=1G
 ;nrfiles=2
 ;ioengine=libaio
 ;ioengine=pvsync2
@@ -27,5 +27,5 @@ size=5G
 ;iodepth=16
 
 ;end_fsync=1
-;fsync_on_close=1
-;fsync=100
+fsync_on_close=1
+fsync=100

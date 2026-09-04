@@ -7,7 +7,7 @@
 
 #define HASH_MODE (1)
 #if HASH_MODE
-#define BUCKET_CNT (4)
+#define BUCKET_CNT (128)
 #endif
 
 #define MAX_SIZE (0xFFFFFFFF)

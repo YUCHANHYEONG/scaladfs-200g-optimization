@@ -22,6 +22,7 @@ struct LNode {
 struct ListRL {
 #if HASH_MODE
 	 struct LNode* head[BUCKET_CNT];
+	 atomic_t rr; //round robin
 #else
 	 struct LNode* head;
 #endif
@@ -42,8 +43,9 @@ struct RangeLock* MutexRangeAcquire(struct ListRL* list_rl,
 												unsigned int start,
 												unsigned int end, bool try);
 #endif
-void MutexRangeRelease(struct RangeLock* rl);
+// void MutexRangeRelease(struct RangeLock* rl);
 struct list_head* FetchHead(struct ListRL *listrl);
+
 /* ych	*/
 struct list_head* FetchTail(struct ListRL *listrl);
 /* ych	*/
@@ -62,6 +64,13 @@ static inline struct RangeLock* InsertInode(struct ListRL* list_rl,
 {
 	return __InsertInode(list_rl, inode, false);
 }
+
+/* ych	*/
+void MarkInodeNodes(struct ListRL *list_rl, struct list_head *inode);
+
+struct LNode *AllocInodeNode(struct list_head *inode);
+void InsertInodePrealloc(struct ListRL *list_rl, struct LNode *lnode, bool writer);
+/* ych	*/
 
 void bucket_init(struct ListRL *list_rl);
 
