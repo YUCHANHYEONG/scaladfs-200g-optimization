@@ -54,15 +54,9 @@
 #include <lu_object.h>
 #include "cl_internal.h"
 
-/* init-time cl_page reserve implemented in cl_page.c */
-int cl_page_pool_init(void);
-void cl_page_pool_fini(void);
-
 static struct kmem_cache *cl_env_kmem;
 struct kmem_cache *cl_dio_aio_kmem;
 struct kmem_cache *cl_sub_dio_kmem;
-struct kmem_cache *cl_page_kmem_array[16];
-unsigned short cl_page_kmem_size_array[16];
 
 /** Lock class of cl_object_header::coh_attr_guard */
 static struct lock_class_key cl_attr_guard_class;
@@ -1095,9 +1089,8 @@ int cl_global_init(void)
 		GOTO(out_envs, result);
 
 	/*
-	 * coh_page_bufsize is fixed at 224 in this experiment.
-	 * Create cl_page_kmem-224 and preallocate the full cl_page reserve
-	 * before any normal client I/O can reach __cl_page_alloc().
+	 * Initialize the local-only per-CPU cl_page pools and create the single
+	 * 224-byte cl_page kmem cache. No cl_page objects are preallocated.
 	 */
 	result = cl_page_pool_init();
 	if (result)
@@ -1117,23 +1110,7 @@ int cl_global_init(void)
 out_keys:
 	lu_context_key_degister(&cl_key);
 out_page_pool:
-	/*
-	 * cl_page_pool_fini() returns the 1M reserve to the kmem cache.
-	 * cl_object.c owns cl_page_kmem_array[], so destroy those caches here
-	 * on an init failure just as cl_global_fini() does on normal unload.
-	 */
 	cl_page_pool_fini();
-	{
-		int i;
-
-		for (i = 0; i < ARRAY_SIZE(cl_page_kmem_array); i++) {
-			if (cl_page_kmem_array[i]) {
-				kmem_cache_destroy(cl_page_kmem_array[i]);
-				cl_page_kmem_array[i] = NULL;
-				cl_page_kmem_size_array[i] = 0;
-			}
-		}
-	}
 out_kmem:
 	lu_kmem_fini(cl_object_caches);
 out_envs:
@@ -1147,18 +1124,11 @@ out:
  */
 void cl_global_fini(void)
 {
-	int i;
-
 	cl_page_pool_fini();
-	for (i = 0; i < ARRAY_SIZE(cl_page_kmem_array); i++) {
-		if (cl_page_kmem_array[i]) {
-			kmem_cache_destroy(cl_page_kmem_array[i]);
-			cl_page_kmem_array[i] = NULL;
-		}
-	}
 	cl_env_percpu_fini();
 	lu_context_key_degister(&cl_key);
 	lu_kmem_fini(cl_object_caches);
 	OBD_FREE_PTR_ARRAY(cl_envs, num_possible_cpus());
 }
+
 

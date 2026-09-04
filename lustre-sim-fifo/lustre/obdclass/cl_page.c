@@ -40,7 +40,6 @@
 #include <linux/percpu.h>
 #include <linux/cpu.h>
 #include <linux/string.h>
-#include <linux/sched.h>
 #include <libcfs/libcfs.h>
 #include <obd_class.h>
 #include <obd_support.h>
@@ -51,319 +50,162 @@
 #include "../include/calclock.h"
 
 static void __cl_page_delete(const struct lu_env *env, struct cl_page *pg);
-static DEFINE_MUTEX(cl_page_kmem_mutex);
-
 
 /*
- * Init-time preallocation pool for cl_page allocations.
+ * Simplified cl_page reuse pool for this experiment.
  *
- * coh_page_bufsize is fixed at 224 bytes for this experiment.  Create the
- * 224-byte cl_page cache and reserve TEST_CL_PAGE_POOL_TOTAL objects before
- * any write path starts.  The total (not per-CPU) reserve is distributed
- * across all possible CPUs.  The fast path first consumes its local pool and
- * only scans another CPU when the local pool is empty.
+ * coh_page_bufsize is fixed at 224 bytes on the normal path.
+ *
+ * - one 224-byte kmem cache
+ * - one local free-list per CPU
+ * - no cross-CPU stealing
+ * - no init-time cl_page preallocation
+ *
+ * A local pool miss falls back to OBD_SLAB_ALLOC_GFP().  Once that cl_page
+ * reaches its final free path, it is kept in the current CPU's pool and can
+ * be reused by a later allocation on that CPU.
  */
-#define TEST_CL_PAGE_POOL_TOTAL            100000000U
-#define TEST_CL_PAGE_PREALLOC_BUFSIZE      224U
-#define TEST_CL_PAGE_PREALLOC_INDEX        0
+#define TEST_CL_PAGE_BUFSIZE	224U
 
-struct test_cl_page_pool_entry {
-	spinlock_t		lock;
-	struct list_head	free_list;
-	unsigned int		nr;
-	unsigned int		capacity;
-};
+static struct kmem_cache *cl_page_kmem;
 
 struct test_cl_page_pool_cpu {
-	struct test_cl_page_pool_entry
-		entry[ARRAY_SIZE(cl_page_kmem_array)];
+	spinlock_t		lock;
+	struct list_head	free_list;
 };
 
 static DEFINE_PER_CPU(struct test_cl_page_pool_cpu, test_cl_page_pool);
-static bool test_cl_page_pool_initialized;
-static bool test_cl_page_pool_stopping;
+static bool test_cl_page_pool_enabled;
 
-void cl_page_pool_fini(void);
-
-static struct cl_page *
-test_cl_page_pool_pop_cpu(int cpu, int index)
+static struct cl_page *test_cl_page_pool_get(void)
 {
-	struct test_cl_page_pool_cpu *pcpu;
-	struct test_cl_page_pool_entry *pool;
+	struct test_cl_page_pool_cpu *pool;
 	struct cl_page *cl_page = NULL;
 	unsigned long flags;
 
-	pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
-	pool = &pcpu->entry[index];
+	if (unlikely(!READ_ONCE(test_cl_page_pool_enabled)))
+		return NULL;
+
+	preempt_disable();
+	pool = this_cpu_ptr(&test_cl_page_pool);
 
 	spin_lock_irqsave(&pool->lock, flags);
-	if (!READ_ONCE(test_cl_page_pool_stopping) &&
+	if (READ_ONCE(test_cl_page_pool_enabled) &&
 	    !list_empty(&pool->free_list)) {
 		cl_page = list_first_entry(&pool->free_list,
 					   struct cl_page, cp_batch);
 		list_del_init(&cl_page->cp_batch);
-		LASSERT(pool->nr > 0);
-		pool->nr--;
 	}
 	spin_unlock_irqrestore(&pool->lock, flags);
+
+	preempt_enable();
 
 	return cl_page;
 }
 
-static struct cl_page *test_cl_page_pool_get(int index)
+static bool test_cl_page_pool_put(struct cl_page *cl_page)
 {
-	struct cl_page *cl_page;
-	int local_cpu;
-	int cpu;
-
-	if (unlikely(index < 0 || index >= ARRAY_SIZE(cl_page_kmem_array)))
-		return NULL;
-	if (unlikely(!READ_ONCE(test_cl_page_pool_initialized) ||
-		     READ_ONCE(test_cl_page_pool_stopping)))
-		return NULL;
-
-	preempt_disable();
-	local_cpu = smp_processor_id();
-	cl_page = test_cl_page_pool_pop_cpu(local_cpu, index);
-	preempt_enable();
-	if (cl_page)
-		return cl_page;
-
-	/* Local pool is empty.  Steal from another CPU before allocating. */
-	for_each_possible_cpu(cpu) {
-		if (cpu == local_cpu)
-			continue;
-		cl_page = test_cl_page_pool_pop_cpu(cpu, index);
-		if (cl_page)
-			return cl_page;
-	}
-
-	return NULL;
-}
-
-static bool
-test_cl_page_pool_push_cpu(struct cl_page *cl_page, int index, int cpu)
-{
-	struct test_cl_page_pool_cpu *pcpu;
-	struct test_cl_page_pool_entry *pool;
+	struct test_cl_page_pool_cpu *pool;
 	unsigned long flags;
 	bool inserted = false;
 
-	pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
-	pool = &pcpu->entry[index];
-
-	spin_lock_irqsave(&pool->lock, flags);
-	if (!READ_ONCE(test_cl_page_pool_stopping) &&
-	    pool->nr < pool->capacity) {
-		list_add(&cl_page->cp_batch, &pool->free_list);
-		pool->nr++;
-		inserted = true;
-	}
-	spin_unlock_irqrestore(&pool->lock, flags);
-
-	return inserted;
-}
-
-static bool test_cl_page_pool_put(struct cl_page *cl_page, int index)
-{
-	int local_cpu;
-	int cpu;
-
-	if (unlikely(index < 0 || index >= ARRAY_SIZE(cl_page_kmem_array)))
-		return false;
-	if (unlikely(!READ_ONCE(test_cl_page_pool_initialized) ||
-		     READ_ONCE(test_cl_page_pool_stopping)))
+	if (unlikely(!READ_ONCE(test_cl_page_pool_enabled)))
 		return false;
 
 	LASSERT(list_empty(&cl_page->cp_batch));
 
 	preempt_disable();
-	local_cpu = smp_processor_id();
-	if (test_cl_page_pool_push_cpu(cl_page, index, local_cpu)) {
-		preempt_enable();
-		return true;
+	pool = this_cpu_ptr(&test_cl_page_pool);
+
+	spin_lock_irqsave(&pool->lock, flags);
+	if (READ_ONCE(test_cl_page_pool_enabled)) {
+		list_add(&cl_page->cp_batch, &pool->free_list);
+		inserted = true;
 	}
+	spin_unlock_irqrestore(&pool->lock, flags);
+
 	preempt_enable();
 
-	/* Preserve the fixed total reserve even if frees migrate CPUs. */
-	for_each_possible_cpu(cpu) {
-		if (cpu == local_cpu)
-			continue;
-		if (test_cl_page_pool_push_cpu(cl_page, index, cpu))
-			return true;
-	}
-
-	return false;
+	return inserted;
 }
 
 int cl_page_pool_init(void)
 {
-	bool created_cache = false;
-	unsigned int ncpus = num_possible_cpus();
-	unsigned int base;
-	unsigned int rem;
-	unsigned long total = 0;
-	unsigned int ordinal = 0;
 	int cpu;
-	int index;
 
-	if (READ_ONCE(test_cl_page_pool_initialized))
+	if (READ_ONCE(test_cl_page_pool_enabled))
 		return 0;
-	if (unlikely(ncpus == 0))
-		return -EINVAL;
-
-	base = TEST_CL_PAGE_POOL_TOTAL / ncpus;
-	rem = TEST_CL_PAGE_POOL_TOTAL % ncpus;
 
 	for_each_possible_cpu(cpu) {
-		struct test_cl_page_pool_cpu *pcpu;
+		struct test_cl_page_pool_cpu *pool;
 
-		pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
-		for (index = 0; index < ARRAY_SIZE(cl_page_kmem_array); index++) {
-			struct test_cl_page_pool_entry *pool = &pcpu->entry[index];
-
-			spin_lock_init(&pool->lock);
-			INIT_LIST_HEAD(&pool->free_list);
-			pool->nr = 0;
-			pool->capacity = 0;
-		}
-
-		pcpu->entry[TEST_CL_PAGE_PREALLOC_INDEX].capacity =
-			base + (ordinal < rem ? 1 : 0);
-		ordinal++;
+		pool = per_cpu_ptr(&test_cl_page_pool, cpu);
+		spin_lock_init(&pool->lock);
+		INIT_LIST_HEAD(&pool->free_list);
 	}
+
+	cl_page_kmem = kmem_cache_create("cl_page_kmem-224",
+					 TEST_CL_PAGE_BUFSIZE,
+					 0, 0, NULL);
+	if (cl_page_kmem == NULL)
+		return -ENOMEM;
 
 	/*
-	 * coh_page_bufsize is known to be 224 in this experiment, so create
-	 * its slab cache during cl_global_init() instead of on the first write.
+	 * Publish the pool only after every per-CPU list and the kmem cache are
+	 * ready.
 	 */
-	mutex_lock(&cl_page_kmem_mutex);
-	if (cl_page_kmem_array[TEST_CL_PAGE_PREALLOC_INDEX] == NULL) {
-		cl_page_kmem_array[TEST_CL_PAGE_PREALLOC_INDEX] =
-			kmem_cache_create("cl_page_kmem-224",
-					  TEST_CL_PAGE_PREALLOC_BUFSIZE,
-					  0, 0, NULL);
-		if (cl_page_kmem_array[TEST_CL_PAGE_PREALLOC_INDEX] == NULL) {
-			mutex_unlock(&cl_page_kmem_mutex);
-			return -ENOMEM;
-		}
-		created_cache = true;
-		smp_store_release(
-			&cl_page_kmem_size_array[TEST_CL_PAGE_PREALLOC_INDEX],
-			TEST_CL_PAGE_PREALLOC_BUFSIZE);
-	} else if (cl_page_kmem_size_array[TEST_CL_PAGE_PREALLOC_INDEX] !=
-		   TEST_CL_PAGE_PREALLOC_BUFSIZE) {
-		mutex_unlock(&cl_page_kmem_mutex);
-		return -EINVAL;
-	}
-	mutex_unlock(&cl_page_kmem_mutex);
-
-	WRITE_ONCE(test_cl_page_pool_stopping, false);
 	smp_wmb();
-	WRITE_ONCE(test_cl_page_pool_initialized, true);
+	WRITE_ONCE(test_cl_page_pool_enabled, true);
 
-	for_each_possible_cpu(cpu) {
-		struct test_cl_page_pool_cpu *pcpu;
-		struct test_cl_page_pool_entry *pool;
-		unsigned int i;
+	pr_info("[cl_page_pool] enabled: size=%u, local-only, no prealloc\n",
+		TEST_CL_PAGE_BUFSIZE);
 
-		pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
-		pool = &pcpu->entry[TEST_CL_PAGE_PREALLOC_INDEX];
-
-		for (i = 0; i < pool->capacity; i++) {
-			struct cl_page *cl_page = NULL;
-
-			OBD_SLAB_ALLOC_GFP(
-				cl_page,
-				cl_page_kmem_array[TEST_CL_PAGE_PREALLOC_INDEX],
-				TEST_CL_PAGE_PREALLOC_BUFSIZE,
-				GFP_NOFS);
-			if (!cl_page)
-				goto out_nomem;
-
-			cl_page->cp_kmem_index = TEST_CL_PAGE_PREALLOC_INDEX;
-			INIT_LIST_HEAD(&cl_page->cp_batch);
-			list_add(&cl_page->cp_batch, &pool->free_list);
-			pool->nr++;
-			total++;
-
-			if ((total & 0xfffUL) == 0)
-				cond_resched();
-		}
-	}
-
-	pr_info("[cl_page_pool] preallocated %lu objects, size=%u bytes\n",
-		total, TEST_CL_PAGE_PREALLOC_BUFSIZE);
 	return 0;
-
-out_nomem:
-	CERROR("cl_page pool preallocation stopped at %lu/%u objects\n",
-	       total, TEST_CL_PAGE_POOL_TOTAL);
-	cl_page_pool_fini();
-	WRITE_ONCE(test_cl_page_pool_initialized, false);
-	if (created_cache) {
-		kmem_cache_destroy(cl_page_kmem_array[TEST_CL_PAGE_PREALLOC_INDEX]);
-		cl_page_kmem_array[TEST_CL_PAGE_PREALLOC_INDEX] = NULL;
-		smp_store_release(
-			&cl_page_kmem_size_array[TEST_CL_PAGE_PREALLOC_INDEX], 0);
-	}
-	return -ENOMEM;
 }
 
-/*
- * Drain all objects retained by the init-time cl_page pool.
- * Call this before cl_global_fini() destroys cl_page_kmem_array[].
- */
 void cl_page_pool_fini(void)
 {
-	unsigned long drained[ARRAY_SIZE(cl_page_kmem_array)] = { 0 };
+	unsigned long drained = 0;
 	int cpu;
-	int index;
 
-	if (!READ_ONCE(test_cl_page_pool_initialized))
+	if (cl_page_kmem == NULL)
 		return;
 
-	WRITE_ONCE(test_cl_page_pool_stopping, true);
+	/*
+	 * Stop new get/put operations before draining the local pools.
+	 * Normal Lustre teardown still has to guarantee that active cl_page
+	 * users are gone before cl_global_fini() completes.
+	 */
+	WRITE_ONCE(test_cl_page_pool_enabled, false);
 	smp_mb();
 
 	for_each_possible_cpu(cpu) {
-		struct test_cl_page_pool_cpu *pcpu;
+		struct test_cl_page_pool_cpu *pool;
+		LIST_HEAD(local_list);
+		unsigned long flags;
 
-		pcpu = per_cpu_ptr(&test_cl_page_pool, cpu);
-		for (index = 0; index < ARRAY_SIZE(cl_page_kmem_array); index++) {
-			struct test_cl_page_pool_entry *pool = &pcpu->entry[index];
-			LIST_HEAD(local_list);
-			unsigned long flags;
-			unsigned short bufsize;
+		pool = per_cpu_ptr(&test_cl_page_pool, cpu);
 
-			spin_lock_irqsave(&pool->lock, flags);
-			list_splice_init(&pool->free_list, &local_list);
-			pool->nr = 0;
-			spin_unlock_irqrestore(&pool->lock, flags);
+		spin_lock_irqsave(&pool->lock, flags);
+		list_splice_init(&pool->free_list, &local_list);
+		spin_unlock_irqrestore(&pool->lock, flags);
 
-			bufsize = smp_load_acquire(&cl_page_kmem_size_array[index]);
-			while (!list_empty(&local_list)) {
-				struct cl_page *cl_page;
+		while (!list_empty(&local_list)) {
+			struct cl_page *cl_page;
 
-				cl_page = list_first_entry(&local_list,
-							   struct cl_page, cp_batch);
-				list_del_init(&cl_page->cp_batch);
-				LASSERT(cl_page_kmem_array[index] != NULL);
-				LASSERT(bufsize != 0);
-				OBD_SLAB_FREE(cl_page, cl_page_kmem_array[index],
-					      bufsize);
-				drained[index]++;
-			}
+			cl_page = list_first_entry(&local_list,
+						   struct cl_page, cp_batch);
+			list_del_init(&cl_page->cp_batch);
+			OBD_SLAB_FREE(cl_page, cl_page_kmem,
+				      TEST_CL_PAGE_BUFSIZE);
+			drained++;
 		}
 	}
 
-	WRITE_ONCE(test_cl_page_pool_initialized, false);
+	kmem_cache_destroy(cl_page_kmem);
+	cl_page_kmem = NULL;
 
-	for (index = 0; index < ARRAY_SIZE(cl_page_kmem_array); index++) {
-		if (drained[index])
-			pr_info("[cl_page_pool] cache=%d size=%u drained=%lu\n",
-				index, cl_page_kmem_size_array[index], drained[index]);
-	}
+	pr_info("[cl_page_pool] drained %lu objects\n", drained);
 }
 
 #ifdef LIBCFS_DEBUG
@@ -466,22 +308,22 @@ cl_page_slice_get(const struct cl_page *cl_page, int index)
 
 static void __cl_page_free(struct cl_page *cl_page, unsigned short bufsize)
 {
-	int index = cl_page->cp_kmem_index;
-
-	if (index >= 0) {
-		LASSERT(index < ARRAY_SIZE(cl_page_kmem_array));
-		LASSERT(cl_page_kmem_size_array[index] == bufsize);
-
+	if (likely(bufsize == TEST_CL_PAGE_BUFSIZE)) {
 		/*
-		 * Keep final-freed slab-backed cl_page objects in the temporary
-		 * per-CPU pool.  If the pool is full or teardown has started,
-		 * return the object to the original kmem cache immediately.
+		 * Keep the 224-byte slab-backed object in this CPU's local pool.
+		 * During teardown the pool is disabled, so return it directly to
+		 * the single kmem cache instead.
 		 */
-		if (!test_cl_page_pool_put(cl_page, index))
-			OBD_SLAB_FREE(cl_page, cl_page_kmem_array[index],
-				      bufsize);
+		if (!test_cl_page_pool_put(cl_page)) {
+			LASSERT(cl_page_kmem != NULL);
+			OBD_SLAB_FREE(cl_page, cl_page_kmem,
+				      TEST_CL_PAGE_BUFSIZE);
+		}
 	} else {
-		/* Objects allocated by the fallback OBD_ALLOC path are not pooled. */
+		/*
+		 * Unexpected non-224-byte allocations use OBD_ALLOC_GFP() in
+		 * __cl_page_alloc() and are not pooled.
+		 */
 		OBD_FREE(cl_page, bufsize);
 	}
 }
@@ -529,7 +371,6 @@ EXPORT_SYMBOL(slab__cl_page_alloc_clock);
 
 static struct cl_page *__cl_page_alloc(struct cl_object *o)
 {
-	int i = 0;
 	struct cl_page *cl_page = NULL;
 	unsigned short bufsize = cl_object_header(o)->coh_page_bufsize;
 	ktime_t localclock[2];
@@ -537,74 +378,41 @@ static struct cl_page *__cl_page_alloc(struct cl_object *o)
 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_PAGE_ALLOC))
 		return NULL;
 
+	if (likely(bufsize == TEST_CL_PAGE_BUFSIZE)) {
+		ktget(&localclock[0]);
+		cl_page = test_cl_page_pool_get();
+		ktget(&localclock[1]);
+		ktput(localclock, slab__cl_page_alloc);
 
-check:
-	/* the number of entries in cl_page_kmem_array is expected to
-	 * only be 2-3 entries, so the lookup overhead should be low.
-	 */
-	for ( ; i < ARRAY_SIZE(cl_page_kmem_array); i++) {
-		if (smp_load_acquire(&cl_page_kmem_size_array[i])
-		    == bufsize) {
-			ktget(&localclock[0]);
+		/*
+		 * The current CPU has no reusable object.  Allocate one from the
+		 * same single 224-byte kmem cache used by this path.
+		 */
+		if (cl_page == NULL)
+			OBD_SLAB_ALLOC_GFP(cl_page, cl_page_kmem,
+					   TEST_CL_PAGE_BUFSIZE, GFP_NOFS);
 
-			cl_page = test_cl_page_pool_get(i);
-			ktget(&localclock[1]);
-			ktput(localclock, slab__cl_page_alloc);
-
-			/* Pool was fully consumed: fall back to one normal allocation. */
-			if (!cl_page)
-				OBD_SLAB_ALLOC_GFP(cl_page, cl_page_kmem_array[i],
-						   bufsize, GFP_NOFS);
-
+		if (cl_page != NULL) {
 			/*
 			 * cl_page allocations contain layer-private slices after
-			 * struct cl_page.  Clear the entire allocation, not merely
-			 * sizeof(struct cl_page), so a recycled page cannot expose
-			 * stale state from the previous lifetime.
+			 * struct cl_page.  Clear the whole allocation before the
+			 * next lifetime. cl_page_alloc() initializes cp_batch again
+			 * before the object is exposed to the layer callbacks.
 			 */
-			if (cl_page)
-				memset(cl_page, 0, bufsize);
-
-
-			if (cl_page)
-				cl_page->cp_kmem_index = i;
-
-			return cl_page;
+			memset(cl_page, 0, TEST_CL_PAGE_BUFSIZE);
+			cl_page->cp_kmem_index = 0;
 		}
-		if (cl_page_kmem_size_array[i] == 0)
-			break;
+
+		return cl_page;
 	}
 
-	if (i < ARRAY_SIZE(cl_page_kmem_array)) {
-		char cache_name[32];
-
-		mutex_lock(&cl_page_kmem_mutex);
-		if (cl_page_kmem_size_array[i]) {
-			mutex_unlock(&cl_page_kmem_mutex);
-			goto check;
-		}
-		snprintf(cache_name, sizeof(cache_name),
-			 "cl_page_kmem-%u", bufsize);
-		cl_page_kmem_array[i] =
-			kmem_cache_create(cache_name, bufsize,
-					  0, 0, NULL);
-		if (cl_page_kmem_array[i] == NULL) {
-			mutex_unlock(&cl_page_kmem_mutex);
-			return NULL;
-		}
-		smp_store_release(&cl_page_kmem_size_array[i],
-				  bufsize);
-		mutex_unlock(&cl_page_kmem_mutex);
-		goto check;
-	} else {
-		/*
-		 * Preserve the original fallback behavior when all slab-cache
-		 * slots are occupied.  This path is deliberately not pooled.
-		 */
-		OBD_ALLOC_GFP(cl_page, bufsize, GFP_NOFS);
-		if (cl_page)
-			cl_page->cp_kmem_index = -1;
-	}
+	/*
+	 * Safety fallback for an unexpected cl_page size.  This keeps the
+	 * original non-slab fallback behavior, but such objects are not pooled.
+	 */
+	OBD_ALLOC_GFP(cl_page, bufsize, GFP_NOFS);
+	if (cl_page != NULL)
+		cl_page->cp_kmem_index = -1;
 
 	return cl_page;
 }
@@ -1608,5 +1416,6 @@ void cl_cache_decref(struct cl_client_cache *cache)
 		OBD_FREE(cache, sizeof(*cache));
 }
 EXPORT_SYMBOL(cl_cache_decref);
+
 
 
