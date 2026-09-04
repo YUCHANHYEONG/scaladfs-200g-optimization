@@ -58,7 +58,7 @@
  * allocation consumes the local quota first and steals from another CPU only
  * when necessary.  There is no 1,000,000-object refill loop in the write path.
  */
-#define TEST_SET_POOL_TOTAL       1000000U
+#define TEST_SET_POOL_TOTAL       100000000U
 
 struct test_set_pool_cpu {
         spinlock_t              lock;
@@ -80,7 +80,8 @@ static struct ptlrpc_request_set *test_set_pool_pop_cpu(int cpu)
 
         pool = per_cpu_ptr(&test_set_pool, cpu);
         spin_lock_irqsave(&pool->lock, flags);
-        if (!list_empty(&pool->free_list)) {
+        if (!READ_ONCE(test_set_pool_stopping) &&
+            !list_empty(&pool->free_list)) {
                 node = pool->free_list.next;
                 list_del(node);
                 LASSERT(pool->nr > 0);
@@ -200,6 +201,7 @@ static void test_set_pool_fini(void)
                 }
         }
 
+        WRITE_ONCE(test_set_pool_initialized, false);
         pr_info("[reqset_pool] drained %lu objects\n", total);
 }
 

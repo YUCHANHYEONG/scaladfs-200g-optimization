@@ -2675,6 +2675,8 @@ KTDEF(brw_cl_loi_list_lock);
 EXPORT_SYMBOL(brw_cl_loi_list_lock_clock);
 KTDEF(brw_osc_io_unplug);
 EXPORT_SYMBOL(brw_osc_io_unplug_clock);
+KTDEF(slab_brw_interpret);
+EXPORT_SYMBOL(slab_brw_interpret_clock);
 
 static int brw_interpret_internal(const struct lu_env *env,
 			 struct ptlrpc_request *req, void *args, int rc)
@@ -2786,7 +2788,10 @@ static int brw_interpret_internal(const struct lu_env *env,
 			cl_object_attr_update(env, obj, attr, valid);
 		cl_object_attr_unlock(obj);
 	}
+	ktget(&localclock[0]);
 	OBD_SLAB_FREE_PTR(aa->aa_oa, osc_obdo_kmem);
+	ktget(&localclock[1]);
+	ktput(localclock, slab_brw_interpret);
 	aa->aa_oa = NULL;
 	// atomic_set(&req->application, 3);
 	// pr_info("Interpreted: request %px aa %px rc %d\n", req, aa, rc);

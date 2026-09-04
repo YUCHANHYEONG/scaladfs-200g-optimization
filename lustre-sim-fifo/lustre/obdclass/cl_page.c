@@ -63,7 +63,7 @@ static DEFINE_MUTEX(cl_page_kmem_mutex);
  * across all possible CPUs.  The fast path first consumes its local pool and
  * only scans another CPU when the local pool is empty.
  */
-#define TEST_CL_PAGE_POOL_TOTAL            1000000U
+#define TEST_CL_PAGE_POOL_TOTAL            100000000U
 #define TEST_CL_PAGE_PREALLOC_BUFSIZE      224U
 #define TEST_CL_PAGE_PREALLOC_INDEX        0
 
@@ -97,7 +97,8 @@ test_cl_page_pool_pop_cpu(int cpu, int index)
 	pool = &pcpu->entry[index];
 
 	spin_lock_irqsave(&pool->lock, flags);
-	if (!list_empty(&pool->free_list)) {
+	if (!READ_ONCE(test_cl_page_pool_stopping) &&
+	    !list_empty(&pool->free_list)) {
 		cl_page = list_first_entry(&pool->free_list,
 					   struct cl_page, cp_batch);
 		list_del_init(&cl_page->cp_batch);
@@ -355,6 +356,8 @@ void cl_page_pool_fini(void)
 			}
 		}
 	}
+
+	WRITE_ONCE(test_cl_page_pool_initialized, false);
 
 	for (index = 0; index < ARRAY_SIZE(cl_page_kmem_array); index++) {
 		if (drained[index])

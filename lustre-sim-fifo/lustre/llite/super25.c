@@ -260,6 +260,16 @@ extern struct lflist_head lf_b_more_io;
 extern void lustre_iput(struct inode *inode);
 extern void (*iput_in_lustre)(struct inode *inode);
 
+extern struct page *(*conn_rmqueue)(struct zone *preferred_zone,
+			struct zone *zone, unsigned int order,
+			gfp_t gfp_flags, unsigned int alloc_flags,
+			int migratetype);
+extern struct page *my_rmqueue(struct zone *preferred_zone,
+			struct zone *zone, unsigned int order,
+			gfp_t gfp_flags, unsigned int alloc_flags,
+			int migratetype);
+
+
 // mempool_t *lustre_mempool;
 #define POOL_SIZE 10000
 
@@ -269,6 +279,8 @@ static int __init lustre_init(void)
 	unsigned long lustre_inode_cache_flags;
 
 	pr_info("Insert module \n");
+
+	conn_rmqueue = &my_rmqueue;
 
 	init_lflist_head(&lf_b_more_io);
 
@@ -664,6 +676,7 @@ KTDEC(brw_interpret);
 KTDEC(osc_brw_fini_request);
 KTDEC(brw_cl_loi_list_lock);
 KTDEC(brw_osc_io_unplug);
+KTDEC(slab_brw_interpret);
 
 KTDEC(application_cond_resched);
 
@@ -704,12 +717,14 @@ KTDEC(cl_loi_list_lock_osc_build_rpc);
 KTDEC(cl_loi_list_lock_application_build_rpc);
 KTDEC(cl_loi_list_lock_osc_reconnect);
 KTDEC(cl_loi_list_lock_osc_import_event);
+KTDEC(zone_lock2);
 /* End profiling for cl_loi_list_lock	*/
 
 static void __exit lustre_exit(void)
 {
 	unregister_filesystem(&lustre_fs_type);
 
+	conn_rmqueue = NULL;
 	llite_tunables_unregister();
 	pr_info("llite_tunables_unregister \n");
 
@@ -1037,8 +1052,10 @@ static void __exit lustre_exit(void)
 	ktprint(4, osc_brw_fini_request);
 	ktprint(4, brw_cl_loi_list_lock);
 	ktprint(4, brw_osc_io_unplug);
+	ktprint(5, slab_brw_interpret);
 	//ktprint(1, wait_woken);
 
+	ktprint(0, zone_lock2);
 	// ktreset(ksocknal_process_receive);
 	// ktreset(ksocknal_process_receive_wait);
 	// ktreset(ksocknal_process_transmit);

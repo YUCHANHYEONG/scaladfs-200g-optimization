@@ -47,7 +47,7 @@
 #include <linux/cpu.h>
 #include <linux/sched.h>
 
-#define TEST_EXTENT_POOL_TOTAL       1000000U
+#define TEST_EXTENT_POOL_TOTAL       100000000U
 
 struct test_extent_pool_cpu {
         spinlock_t              lock;

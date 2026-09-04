@@ -3570,12 +3570,15 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 /*
  * Allocate a page from the given zone. Use pcplists for order-0 allocations.
  */
-static inline
-struct page *rmqueue(struct zone *preferred_zone,
+KTDEF(zone_lock2);
+EXPORT_SYMBOL(zone_lock2_clock);
+inline
+struct page *my_rmqueue(struct zone *preferred_zone,
 			struct zone *zone, unsigned int order,
 			gfp_t gfp_flags, unsigned int alloc_flags,
 			int migratetype)
 {
+	ktime_t stopwatch[2];
 	unsigned long flags;
 	struct page *page;
 
@@ -3597,7 +3600,10 @@ struct page *rmqueue(struct zone *preferred_zone,
 	 * allocate greater than order-1 page units with __GFP_NOFAIL.
 	 */
 	WARN_ON_ONCE((gfp_flags & __GFP_NOFAIL) && (order > 1));
+	ktget(&stopwatch[0]);
 	spin_lock_irqsave(&zone->lock, flags);
+	ktget(&stopwatch[1]);
+	ktput(stopwatch, zone_lock2);
 
 	do {
 		page = NULL;
@@ -3639,6 +3645,7 @@ failed:
 	local_irq_restore(flags);
 	return NULL;
 }
+EXPORT_SYMBOL(my_rmqueue);
 
 
 #ifdef CONFIG_FAIL_PAGE_ALLOC
@@ -4053,7 +4060,7 @@ retry:
 		}
 
 try_this_zone:
-		page = rmqueue(ac->preferred_zoneref->zone, zone, order,
+		page = my_rmqueue(ac->preferred_zoneref->zone, zone, order,
 				gfp_mask, alloc_flags, ac->migratetype);
 		if (page) {
 			prep_new_page(page, order, gfp_mask, alloc_flags);
